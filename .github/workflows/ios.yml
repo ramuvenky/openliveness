@@ -1,0 +1,35 @@
+name: iOS SDK
+
+on:
+  push:
+    paths:
+      - 'ios-sdk/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'ios-sdk/**'
+      - '.github/workflows/ios.yml'
+
+jobs:
+  test:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: ios-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build
+        run: swift build -c debug
+
+      - name: Test
+        run: swift test

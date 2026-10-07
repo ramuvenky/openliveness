@@ -1,0 +1,22 @@
+{
+  "name": "@openliveness/verify",
+  "version": "0.1.0",
+  "description": "Verify openliveness attestation JWTs on your backend",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "lint": "tsc -p tsconfig.lint.json"
+  },
+  "dependencies": {
+    "jose": "^5.2.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.4.0"
+  }
+}

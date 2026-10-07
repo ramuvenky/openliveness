@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Example Bank, identity check</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 420px; margin: 48px auto; padding: 0 16px; }
+      #qr img { display: block; margin: 16px 0; }
+      #status { min-height: 1.5em; }
+      #result { background: #f4f4f5; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 13px; }
+      #result:empty { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Verify it is you</h1>
+    <p>We will show a code. Scan it with your phone and follow the steps there.</p>
+    <button id="start">Start check</button>
+    <div id="qr"></div>
+    <p id="status" role="status"></p>
+    <pre id="result"></pre>
+    <script src="app.js"></script>
+  </body>
+</html>

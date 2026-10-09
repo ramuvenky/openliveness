@@ -101,6 +101,13 @@ class CDLSessionE2ETest {
         server.enqueue(
             MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                 // Deliberately do nothing on open — simulate a silent peer.
+                // Echoing the client's close is still required: without it the
+                // server-side WebSocket stays half-open after CDLSession's
+                // timeout closes the client end, and MockWebServer.shutdown()
+                // in @After throws "Gave up waiting for queue to shut down".
+                override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                    ws.close(code, reason)
+                }
             })
         )
         server.start()

@@ -7,18 +7,10 @@ let package = Package(
     products: [
         .library(name: "OpenLiveness", targets: ["OpenLiveness"])
     ],
-    dependencies: [
-        .package(
-            url: "https://github.com/google/mediapipe",
-            from: "0.10.0"
-        )
-    ],
+    dependencies: [],
     targets: [
         .target(
             name: "OpenLiveness",
-            dependencies: [
-                .product(name: "MediaPipeTasksVision", package: "mediapipe")
-            ],
             path: "Sources/OpenLiveness"
         ),
         .testTarget(

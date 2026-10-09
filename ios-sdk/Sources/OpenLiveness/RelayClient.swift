@@ -1,5 +1,10 @@
 import Foundation
 
+public struct CompleteResponse: Decodable {
+    public let accepted: Bool
+    public let attestation_token: String?
+}
+
 /// HTTP client for the relay endpoints the mobile SDK must call.
 /// Base URL is the `relay_http` host supplied in the QR payload — the
 /// relay runs under both http (local dev) and https (production).
@@ -41,11 +46,6 @@ struct RelayClient {
             throw CDLError.networkError("missing nonce in integrity-nonce response")
         }
         return nonce
-    }
-
-    struct CompleteResponse: Decodable {
-        let accepted: Bool
-        let attestation_token: String?
     }
 
     func submitAttestation(sessionId: String, attestation: [String: Any]) async throws -> CompleteResponse {

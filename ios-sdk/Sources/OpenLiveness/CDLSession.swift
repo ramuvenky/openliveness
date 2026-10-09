@@ -26,7 +26,7 @@ public final class CDLSession {
     /// Run the full Week 1 handshake. Returns the relay's complete response
     /// (`accepted` + attestation JWT) once the session is accepted.
     @discardableResult
-    public func start() async throws -> RelayClient.CompleteResponse {
+    public func start() async throws -> CompleteResponse {
         try await openWebSocket()
         try await waitForAcknowledgement()
 

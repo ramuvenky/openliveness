@@ -28,8 +28,8 @@ jobs:
       - name: Resolve dependencies
         run: swift package resolve
 
-      - name: Build
-        run: swift build -c debug
+      - name: Build (iOS Simulator)
+        run: xcodebuild build -scheme OpenLiveness -destination 'generic/platform=iOS Simulator'
 
-      - name: Test
-        run: swift test
+      - name: Test (iOS Simulator)
+        run: xcodebuild test -scheme OpenLiveness -destination 'platform=iOS Simulator,name=iPhone 15'

@@ -67,7 +67,14 @@ class RelayClient(baseURL: String) {
      * testable without a full HTTP round-trip.
      */
     internal fun parseCompleteResponse(body: String): CompleteResponse {
-        val parsed = mapAdapter.fromJson(body) ?: throw CDLException("empty /complete response")
+        if (body.isBlank()) throw CDLException("empty /complete response")
+        val parsed = try {
+            mapAdapter.fromJson(body)
+        } catch (e: Exception) {
+            // Moshi raises EOFException / JsonDataException for malformed input;
+            // wrap so callers only ever see CDLException from this path.
+            throw CDLException("malformed /complete response: ${e.message}")
+        } ?: throw CDLException("malformed /complete response: null")
         val accepted = parsed["accepted"] as? Boolean
             ?: throw CDLException("malformed /complete response: missing or non-boolean 'accepted'")
         val token = when (val v = parsed["attestation_token"]) {

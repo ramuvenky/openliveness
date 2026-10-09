@@ -95,6 +95,14 @@ final class OpenLivenessTests: XCTestCase {
     }
 
     func testSigningProducesVerifiableSignature() throws {
+        // Keychain writes now throw instead of silently falling back to an
+        // ephemeral key (HIGH #1 fix). Simulators under xcodebuild often lack
+        // Keychain for test bundles (no entitlements), so skip rather than
+        // false-fail on infra.
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
         let attestation: [String: Any] = ["session_id": "abc", "liveness_decision": "pass"]
         let sig = try SigningService.sign(attestation)
         XCTAssertFalse(sig.isEmpty)
@@ -328,6 +336,55 @@ final class OpenLivenessTests: XCTestCase {
                 XCTFail("expected CDLError.networkError, got \(error)"); return
             }
         }
+    }
+
+    func testParseCompleteResponseThrowsOnEmptyBody() {
+        // Mirrors Android's `parseCompleteResponse rejects empty body` so the
+        // "no body received" case produces an identifiable error on both
+        // platforms. iOS routes empty data through JSONSerialization which
+        // throws, so this currently flows through the same "empty or non-JSON"
+        // branch as `testParseCompleteResponseThrowsOnNonJsonBody` — but the
+        // explicit coverage protects against future refactors that special-case
+        // one path but not the other.
+        let data = Data()
+        XCTAssertThrowsError(try RelayClient.parseCompleteResponse(data)) { error in
+            guard case CDLError.networkError = error else {
+                XCTFail("expected CDLError.networkError, got \(error)"); return
+            }
+        }
+    }
+
+    // MARK: - SigningService wire format
+    //
+    // Locks in that iOS emits DER-encoded ECDSA signatures (ASN.1 SEQUENCE of
+    // two INTEGERs) rather than CryptoKit's raw r||s `rawRepresentation`.
+    // This matches Android's SHA256withECDSA output so both platforms produce
+    // the same wire format and server verifiers only need one code path. A
+    // regression back to `rawRepresentation` would produce exactly 64 bytes
+    // with no 0x30 prefix and would fail this test immediately.
+
+    func testSigningServiceEmitsDerEncodedSignature() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+
+        let attestation: [String: Any] = ["session_id": "abc", "liveness_decision": "pass"]
+        let base64Sig = try SigningService.sign(attestation)
+        guard let sig = Data(base64Encoded: base64Sig) else {
+            XCTFail("signature not base64"); return
+        }
+
+        // DER ECDSA(P-256): 0x30 <len> 0x02 <r_len> <r> 0x02 <s_len> <s>.
+        // Minimum realistic length is well above 64; raw r||s is always
+        // exactly 64 with no 0x30 prefix. Checking the tag + length-byte
+        // self-consistency catches a regression to rawRepresentation without
+        // being flaky across r/s leading-zero stripping edge cases.
+        XCTAssertEqual(sig.first, 0x30, "expected ASN.1 SEQUENCE tag; got \(sig.prefix(4) as NSData)")
+        XCTAssertNotEqual(sig.count, 64, "signature is raw r||s — regressed from DER")
+        XCTAssertGreaterThanOrEqual(sig.count, 8, "signature too short to be DER")
+        // Second byte is the content length — must equal remaining bytes.
+        XCTAssertEqual(Int(sig[1]) + 2, sig.count, "DER length byte doesn't match total size")
     }
 
     // MARK: - AttestationBuilder wire format

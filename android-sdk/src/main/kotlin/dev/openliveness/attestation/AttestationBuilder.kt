@@ -69,6 +69,10 @@ object AttestationBuilder {
             attestation["device_attestation"] = deviceAttestation
         }
 
+        // Sign the canonical bytes of the map without the signature field,
+        // then re-canonicalize once the signature is installed so the wire
+        // bytes are exactly what the server will re-canonicalize to verify
+        // (strip signature → re-canonicalize → check against signed bytes).
         val canonicalForSigning = CanonicalJson.encode(attestation).toByteArray(Charsets.UTF_8)
         attestation["signature"] = SigningService.sign(canonicalForSigning)
         return CanonicalJson.encode(attestation).toByteArray(Charsets.UTF_8)

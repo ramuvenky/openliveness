@@ -92,6 +92,13 @@ public final class CDLSession {
     /// Runs `work` concurrently with a sleep task; whichever completes first
     /// wins and cancels the other. Extracted so the ack timeout can be
     /// exercised in unit tests without a WebSocket.
+    ///
+    /// `work` must honor cooperative cancellation — the task group waits for
+    /// every subtask to terminate before returning, so a `work` body that
+    /// ignores `Task.isCancelled` / cancellation-throwing APIs will keep the
+    /// race alive past the deadline. `URLSessionWebSocketTask.receive()` and
+    /// `Task.sleep` already behave correctly; a hand-rolled busy loop would
+    /// not.
     static func race<T>(
         timeoutSeconds: UInt64,
         timeoutError: Error,

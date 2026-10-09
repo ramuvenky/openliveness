@@ -77,11 +77,18 @@ struct SigningService {
         func sign(_ data: Data) throws -> Data {
             lock.lock(); defer { lock.unlock() }
             let hash = SHA256.hash(data: data)
+            // DER-encoded ECDSA signature (ASN.1 SEQUENCE of two INTEGERs). We
+            // emit DER rather than CryptoKit's `rawRepresentation` (r||s) so
+            // the wire format matches Android's SHA256withECDSA and server
+            // verifiers that default to DER (Python `cryptography`, OpenSSL,
+            // Java JCA). The server still converts DER→raw for WebCrypto, but
+            // it does so from one canonical input instead of branching on
+            // signature byte length.
             if let k = secureEnclaveKey {
-                return try k.signature(for: hash).rawRepresentation
+                return try k.signature(for: hash).derRepresentation
             }
             guard let k = fallbackKey else { throw CDLError.keychainError }
-            return try k.signature(for: hash).rawRepresentation
+            return try k.signature(for: hash).derRepresentation
         }
 
         private func generateAndPersist() throws {
@@ -100,6 +107,7 @@ struct SigningService {
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrAccount as String: keychainAccount,
+                kSecMatchLimit as String: kSecMatchLimitOne,
                 kSecReturnData as String: true,
                 kSecReturnAttributes as String: true
             ]

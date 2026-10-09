@@ -61,9 +61,12 @@ class RelayClientTest {
 
     @Test
     fun `submitAttestation sends the attestation bytes verbatim on the wire`() = runBlocking {
-        // The server does not canonicalize before verifying — the signature
-        // was computed over these exact bytes, so the request body must
-        // round-trip byte-identical with no Moshi/JSONEncoder re-serialization.
+        // The audit trail requires the request body to be byte-identical to
+        // what AttestationBuilder produced: raw-byte logs on the server must
+        // match the bytes the client committed to. Any Moshi/JSONEncoder
+        // re-serialization in RelayClient would break that guarantee even
+        // though the signature itself would still verify (the server strips
+        // `signature` and re-canonicalizes).
         server.enqueue(MockResponse().setBody("""{"accepted":true}"""))
         client.submitAttestation("s1", attestationBytes)
         val recorded = server.takeRequest()
@@ -126,8 +129,9 @@ class RelayClientTest {
 
     @Test
     fun `parseCompleteResponse rejects non-JSON body`() {
-        assertThrows(Exception::class.java) {
+        val ex = assertThrows(CDLException::class.java) {
             client.parseCompleteResponse("not json at all")
         }
+        assertTrue(ex.message!!.contains("malformed"))
     }
 }

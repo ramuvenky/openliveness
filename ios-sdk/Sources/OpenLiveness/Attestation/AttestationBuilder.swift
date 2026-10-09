@@ -5,9 +5,8 @@ import UIKit
 #endif
 
 /// Produces the signed CDLAttestation dictionary ready to POST to the relay.
-/// Week 1 builds a stub attestation (hardcoded 0.85 scores, challenge
-/// completed = true) so the end-to-end relay handshake can be validated
-/// before the real layer scores exist.
+/// Falls back to stub layer scores when the real detection layers are not
+/// wired in, so the end-to-end relay handshake stays testable in isolation.
 struct AttestationBuilder {
 
     static func build(
@@ -55,7 +54,7 @@ struct AttestationBuilder {
         return attestation
     }
 
-    /// Stub layer scores used in Week 1 before real detection layers exist.
+    /// Stub layer scores used before the real detection layers are wired in.
     static func stubLayerScores() -> LayerScores {
         var s = LayerScores()
         s.layer2ChallengeCompleted = true
@@ -80,8 +79,8 @@ struct AttestationBuilder {
 
     private static func decision(layerScores: LayerScores) -> String {
         if !layerScores.layer2ChallengeCompleted { return "fail" }
-        // Weighted-score logic lives in LivenessOrchestrator in Phase 3;
-        // for Week 1 we trust the stub and emit pass.
+        // Weighted-score logic lives in LivenessOrchestrator; until that
+        // lands we trust the stub and emit pass.
         return "pass"
     }
 

@@ -2,7 +2,11 @@ import Foundation
 
 /// Canonical JSON encoding used for the ES256 signature preimage.
 /// Rules: keys sorted alphabetically (recursive), no whitespace, UTF-8.
-/// Must byte-match the server's canonicalize() in verify/.
+/// Numbers: integer-valued doubles with |x| < 1e16 emit as integers ("1"
+/// not "1.0"); all other finite doubles emit as fixed-point "%.6f". NaN
+/// and infinity throw. This spec is reproducible in Python, Kotlin, and
+/// Swift without relying on shortest-round-trip algorithms that diverge
+/// across runtimes. Must byte-match the server's canonicalize() in verify/.
 enum CanonicalJSON {
 
     static func encode(_ value: Any) throws -> Data {
@@ -25,14 +29,14 @@ enum CanonicalJSON {
         case let n as Int64:
             out += String(n)
         case let n as Double:
-            out += formatNumber(n)
+            out += try formatNumber(n)
         case let n as Float:
-            out += formatNumber(Double(n))
+            out += try formatNumber(Double(n))
         case let n as NSNumber:
             if CFGetTypeID(n) == CFBooleanGetTypeID() {
                 out += n.boolValue ? "true" : "false"
             } else {
-                out += formatNumber(n.doubleValue)
+                out += try formatNumber(n.doubleValue)
             }
         case let s as String:
             out += quote(s)
@@ -58,13 +62,14 @@ enum CanonicalJSON {
         }
     }
 
-    /// Match JSON.stringify numeric formatting: integers without decimals,
-    /// floats as the shortest round-trip representation.
-    private static func formatNumber(_ d: Double) -> String {
+    private static func formatNumber(_ d: Double) throws -> String {
+        guard d.isFinite else {
+            throw CDLError.networkError("non-finite number in canonical JSON")
+        }
         if d.rounded() == d && abs(d) < 1e16 {
             return String(Int64(d))
         }
-        return String(d)
+        return String(format: "%.6f", d)
     }
 
     private static func quote(_ s: String) -> String {

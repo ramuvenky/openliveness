@@ -4,9 +4,8 @@ import CryptoKit
 import DeviceCheck
 #endif
 
-/// Apple App Attest wrapper. Week 1 implements Phase 1 (one-time key
-/// registration against the relay). Phase 2 (per-session assertion) will
-/// land alongside the hardware-attested session flow.
+/// Apple App Attest wrapper. Phase 1 is one-time key registration against
+/// the relay; Phase 2 is per-session assertion.
 ///
 /// App Attest requires a real device — isSupported returns false in the
 /// simulator and this SDK must then fall back to `software_only`.
@@ -59,9 +58,8 @@ class AppAttestService {
         #endif
     }
 
-    /// Phase 2 — per-session assertion. TODO: wire into CDLSession once
-    /// Phase 2 lands. Keeps the API visible so the orchestrator can plan
-    /// around it.
+    /// Phase 2 — per-session assertion. Not yet wired into CDLSession;
+    /// kept visible so the orchestrator can plan around the API.
     func generateAssertion(
         sessionId: String,
         challengeId: String,
@@ -69,7 +67,9 @@ class AppAttestService {
     ) async throws -> String {
         #if canImport(DeviceCheck)
         let keyId = try KeychainService.retrieveKeyId()
-        let clientData = (sessionId + challengeId + livenessDecision).data(using: .utf8)!
+        guard let clientData = (sessionId + challengeId + livenessDecision).data(using: .utf8) else {
+            throw CDLError.networkError("assertion client data not UTF-8 encodable")
+        }
         let clientDataHash = Data(SHA256.hash(data: clientData))
         let assertion = try await generateAssertionWrapped(keyId: keyId, clientDataHash: clientDataHash)
         return assertion.base64EncodedString()

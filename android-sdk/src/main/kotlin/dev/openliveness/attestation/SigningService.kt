@@ -19,10 +19,13 @@ object SigningService {
     private const val KEY_ALIAS = "openliveness_key"
     private const val PROVIDER = "AndroidKeyStore"
 
+    private val lock = Any()
+
     fun publicKeyBase64(): String {
-        val cert = keyStore().getCertificate(KEY_ALIAS) ?: run {
-            generateKey()
-            keyStore().getCertificate(KEY_ALIAS)!!
+        val cert = synchronized(lock) {
+            ensureKey()
+            keyStore().getCertificate(KEY_ALIAS)
+                ?: throw IllegalStateException("signing cert missing after key generation")
         }
         val encoded = (cert.publicKey as ECPublicKey).encoded // X.509 SPKI
         return Base64.encodeToString(encoded, Base64.NO_WRAP)
@@ -30,17 +33,21 @@ object SigningService {
 
     /** Sign the canonical JSON bytes with the device key and return base64. */
     fun sign(canonicalJsonBytes: ByteArray): String {
-        val privateKey = (keyStore().getEntry(KEY_ALIAS, null) as? KeyStore.PrivateKeyEntry)
-            ?.privateKey
-            ?: run {
-                generateKey()
-                (keyStore().getEntry(KEY_ALIAS, null) as KeyStore.PrivateKeyEntry).privateKey
-            }
+        val privateKey = synchronized(lock) {
+            ensureKey()
+            (keyStore().getEntry(KEY_ALIAS, null) as KeyStore.PrivateKeyEntry).privateKey
+        }
         val sig = Signature.getInstance("SHA256withECDSA").apply {
             initSign(privateKey)
             update(canonicalJsonBytes)
         }
         return Base64.encodeToString(sig.sign(), Base64.NO_WRAP)
+    }
+
+    private fun ensureKey() {
+        if (!keyStore().containsAlias(KEY_ALIAS)) {
+            generateKey()
+        }
     }
 
     private fun keyStore(): KeyStore =

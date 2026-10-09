@@ -4,8 +4,8 @@ import UIKit
 #endif
 
 /// AVFoundation front-facing camera session with a drop-in preview view.
-/// Week 1 enforces the front camera (per spec: `front_camera_confirmed`
-/// is always true) and surfaces low-light / permission state so the
+/// Enforces the front camera (per spec: `front_camera_confirmed` is
+/// always true) and surfaces low-light / permission state so the
 /// orchestrator can set `ambient_conditions.low_light_detected`.
 public final class CameraCapture: NSObject {
 

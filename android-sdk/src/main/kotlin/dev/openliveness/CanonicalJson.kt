@@ -1,9 +1,14 @@
 package dev.openliveness
 
+import java.util.Locale
+
 /**
  * Canonical JSON encoder matching the server's canonicalize() implementation
  * in verify/. Rules: keys sorted alphabetically (recursive), no whitespace,
- * UTF-8. The output of this encoder is what gets SHA-256-hashed and signed.
+ * UTF-8. Numbers: integer-valued doubles with |x| < 1e16 emit as integers
+ * ("1" not "1.0"); all other finite doubles emit as fixed-point "%.6f".
+ * NaN and infinity throw. The output of this encoder is what gets
+ * SHA-256-hashed and signed.
  */
 object CanonicalJson {
 
@@ -46,10 +51,13 @@ object CanonicalJson {
     }
 
     private fun formatNumber(d: Double): String {
-        return if (d.isFinite() && d == kotlin.math.floor(d) && kotlin.math.abs(d) < 1e16) {
+        if (!d.isFinite()) {
+            throw IllegalArgumentException("non-finite number in canonical JSON")
+        }
+        return if (d == kotlin.math.floor(d) && kotlin.math.abs(d) < 1e16) {
             d.toLong().toString()
         } else {
-            d.toString()
+            String.format(Locale.ROOT, "%.6f", d)
         }
     }
 
@@ -65,7 +73,11 @@ object CanonicalJson {
                 '\n' -> sb.append("\\n")
                 '\u000C' -> sb.append("\\f")
                 '\r' -> sb.append("\\r")
-                else -> if (c.code < 0x20) sb.append("\\u%04x".format(c.code)) else sb.append(c)
+                else -> if (c.code < 0x20) {
+                    sb.append(String.format(Locale.ROOT, "\\u%04x", c.code))
+                } else {
+                    sb.append(c)
+                }
             }
         }
         sb.append('"')

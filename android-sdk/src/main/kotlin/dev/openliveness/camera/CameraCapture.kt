@@ -12,9 +12,9 @@ import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
 /**
- * CameraX front-camera capture + preview binding. Week 1 enforces the
- * front camera (per spec: front_camera_confirmed is always true) and
- * exposes the configured session so Phase 3 can attach the MediaPipe
+ * CameraX front-camera capture + preview binding. Enforces the front
+ * camera (per spec: front_camera_confirmed is always true) and exposes
+ * the configured session so the orchestrator can attach the MediaPipe
  * analyzer.
  */
 class CameraCapture(private val context: Context) {

@@ -1,5 +1,6 @@
 package dev.openliveness
 
+import com.squareup.moshi.Json
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -17,7 +18,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 class RelayClient(baseURL: String) {
 
     private val base: String = if (baseURL.contains("://")) baseURL else "https://$baseURL"
-    private val http = OkHttpClient()
+    internal val http = OkHttpClient()
     private val moshi: Moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
     private val mapAdapter = moshi.adapter<Map<String, Any?>>(
         Types.newParameterizedType(Map::class.java, String::class.java, Any::class.java)
@@ -26,7 +27,10 @@ class RelayClient(baseURL: String) {
         Types.newParameterizedType(Map::class.java, String::class.java, String::class.java)
     )
 
-    data class CompleteResponse(val accepted: Boolean, val attestation_token: String?)
+    data class CompleteResponse(
+        val accepted: Boolean,
+        @Json(name = "attestation_token") val attestationToken: String?
+    )
 
     suspend fun requestKeyChallenge(keyId: String): String {
         val resp = postMap("/cdl/device/register", mapOf("platform" to "android", "key_id" to keyId))
@@ -50,8 +54,13 @@ class RelayClient(baseURL: String) {
         val json = mapAdapter.toJson(attestation)
         val body = postJson("/cdl/session/$sessionId/complete", json)
         val parsed = mapAdapter.fromJson(body) ?: throw CDLException("empty /complete response")
-        val accepted = parsed["accepted"] as? Boolean ?: false
-        val token = parsed["attestation_token"] as? String
+        val accepted = parsed["accepted"] as? Boolean
+            ?: throw CDLException("malformed /complete response: missing or non-boolean 'accepted'")
+        val token = when (val v = parsed["attestation_token"]) {
+            null -> null
+            is String -> v
+            else -> throw CDLException("malformed /complete response: 'attestation_token' must be string")
+        }
         return CompleteResponse(accepted, token)
     }
 

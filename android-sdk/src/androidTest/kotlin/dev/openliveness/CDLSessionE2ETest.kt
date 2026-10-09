@@ -34,7 +34,7 @@ class CDLSessionE2ETest {
         val response = CDLSession(payload, context).start()
 
         assertEquals(true, response.accepted)
-        assertNotNull(response.attestation_token)
-        assertTrue(response.attestation_token!!.startsWith("stub-attest-"))
+        assertNotNull(response.attestationToken)
+        assertTrue(response.attestationToken!!.startsWith("stub-attest-"))
     }
 }

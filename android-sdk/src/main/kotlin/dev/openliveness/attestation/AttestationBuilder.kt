@@ -12,9 +12,9 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
 /**
- * Builds the signed CDLAttestation map. Week 1 wires in stub layer scores
- * so the end-to-end relay handshake can be exercised ahead of the real
- * detection layers.
+ * Builds the signed CDLAttestation map. Falls back to stub layer scores
+ * so the end-to-end relay handshake stays exercisable before the real
+ * detection layers are wired in.
  */
 object AttestationBuilder {
 

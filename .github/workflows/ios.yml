@@ -32,4 +32,4 @@ jobs:
         run: xcodebuild build -scheme OpenLiveness -destination 'generic/platform=iOS Simulator'
 
       - name: Test (iOS Simulator)
-        run: xcodebuild test -scheme OpenLiveness -destination 'platform=iOS Simulator,name=iPhone 15'
+        run: xcodebuild test -scheme OpenLiveness -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest'

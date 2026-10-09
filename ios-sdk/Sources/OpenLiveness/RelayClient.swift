@@ -2,7 +2,12 @@ import Foundation
 
 public struct CompleteResponse: Decodable {
     public let accepted: Bool
-    public let attestation_token: String?
+    public let attestationToken: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case accepted
+        case attestationToken = "attestation_token"
+    }
 }
 
 /// HTTP client for the relay endpoints the mobile SDK must call.

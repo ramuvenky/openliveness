@@ -9,10 +9,10 @@ import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
 /**
- * Play Integrity wrapper. Week 1 implements only the basic token request
- * — the server-side verification lives in the relay. If Play Integrity is
- * not available on the device the caller should fall back to
- * `assurance_level = "software_only"` and omit `device_attestation`.
+ * Play Integrity wrapper. Issues the basic token request; server-side
+ * verification lives in the relay. If Play Integrity is not available on
+ * the device the caller should fall back to `assurance_level =
+ * "software_only"` and omit `device_attestation`.
  */
 class PlayIntegrityService(private val context: Context) {
 

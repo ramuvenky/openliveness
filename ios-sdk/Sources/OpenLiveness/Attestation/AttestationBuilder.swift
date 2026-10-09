@@ -9,13 +9,22 @@ import UIKit
 /// wired in, so the end-to-end relay handshake stays testable in isolation.
 struct AttestationBuilder {
 
+    /// Builds the signed attestation and returns its canonical-JSON bytes
+    /// ready to POST. Returning bytes (rather than a dictionary) is load-
+    /// bearing: the server verifies the signature over canonical bytes, so
+    /// sending anything else risks wire-vs-signed drift and makes raw-byte
+    /// audit trails meaningless.
     static func build(
         session: CDLSession,
         layerScores: LayerScores,
         ambient: AmbientConditions,
         deviceAttestation: String? = nil
-    ) throws -> [String: Any] {
+    ) throws -> Data {
 
+        // TODO(layer2): `challenge_response` currently echoes the challenge
+        // sequence that the relay already issued, which is trivially replayable.
+        // Replace with the user-observed response captured by Layer2 before
+        // treating attestation submission as evidence of a live challenge.
         var attestation: [String: Any] = [
             "version": "1.0",
             "session_id": session.sessionId,
@@ -42,16 +51,17 @@ struct AttestationBuilder {
                 "motion_detected": ambient.motionDetected,
                 "front_camera_confirmed": ambient.frontCameraConfirmed
             ],
-            "public_key": SigningService.publicKeyBase64()
+            "public_key": try SigningService.publicKeyBase64()
         ]
         if let deviceAttestation = deviceAttestation {
             attestation["device_attestation"] = deviceAttestation
         }
 
-        // Compute the signature over everything EXCEPT the signature field
-        // itself, then install it on a copy for POST.
+        // Sign the canonical bytes of the dict without the signature field,
+        // then re-canonicalize once the signature is installed so the wire
+        // bytes are exactly what the server will re-canonicalize to verify.
         attestation["signature"] = try SigningService.sign(attestation)
-        return attestation
+        return try CanonicalJSON.encode(attestation)
     }
 
     /// Stub layer scores used before the real detection layers are wired in.

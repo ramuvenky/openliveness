@@ -18,14 +18,25 @@ import java.time.format.DateTimeFormatter
  */
 object AttestationBuilder {
 
+    /**
+     * Builds the signed attestation and returns its canonical-JSON bytes
+     * ready to POST. Returning bytes (rather than a Map) is load-bearing:
+     * the server verifies the signature over canonical bytes, so sending
+     * anything else risks wire-vs-signed drift and makes raw-byte audit
+     * trails meaningless. Mirrors iOS AttestationBuilder.build.
+     */
     fun build(
         context: Context,
         session: CDLSession,
         layerScores: LayerScores,
         ambient: AmbientConditions,
         deviceAttestation: String? = null
-    ): Map<String, Any?> {
+    ): ByteArray {
 
+        // TODO(layer2): `challenge_response` currently echoes the challenge
+        // sequence that the relay already issued, which is trivially replayable.
+        // Replace with the user-observed response captured by Layer2 before
+        // treating attestation submission as evidence of a live challenge.
         val attestation = linkedMapOf<String, Any?>(
             "version" to "1.0",
             "session_id" to session.payload.session_id,
@@ -58,9 +69,9 @@ object AttestationBuilder {
             attestation["device_attestation"] = deviceAttestation
         }
 
-        val canonical = CanonicalJson.encode(attestation).toByteArray(Charsets.UTF_8)
-        attestation["signature"] = SigningService.sign(canonical)
-        return attestation
+        val canonicalForSigning = CanonicalJson.encode(attestation).toByteArray(Charsets.UTF_8)
+        attestation["signature"] = SigningService.sign(canonicalForSigning)
+        return CanonicalJson.encode(attestation).toByteArray(Charsets.UTF_8)
     }
 
     fun stubLayerScores(): LayerScores = LayerScores(

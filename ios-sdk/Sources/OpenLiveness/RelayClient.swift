@@ -53,10 +53,42 @@ struct RelayClient {
         return nonce
     }
 
-    func submitAttestation(sessionId: String, attestation: [String: Any]) async throws -> CompleteResponse {
+    /// Submits the pre-canonicalized, signed attestation bytes. Taking Data
+    /// here (not a dictionary) guarantees the wire bytes match what the
+    /// AttestationBuilder signed — see AttestationBuilder.build.
+    func submitAttestation(sessionId: String, attestation: Data) async throws -> CompleteResponse {
         let path = "/cdl/session/\(sessionId)/complete"
-        let data = try JSONSerialization.data(withJSONObject: attestation, options: [])
-        return try await postRaw(path, body: data)
+        let respData = try await postRawBytes(path, body: attestation)
+        return try RelayClient.parseCompleteResponse(respData)
+    }
+
+    /// Parses the `/complete` response with explicit per-field errors so
+    /// malformed responses (missing/non-boolean `accepted`, non-string
+    /// `attestation_token`) throw a CDLError the caller can log, instead of
+    /// surfacing an opaque `DecodingError`. Mirrors Android's hand-written
+    /// validation in RelayClient.kt and is extracted for unit testing.
+    static func parseCompleteResponse(_ data: Data) throws -> CompleteResponse {
+        guard let obj = try? JSONSerialization.jsonObject(with: data),
+              let dict = obj as? [String: Any] else {
+            throw CDLError.networkError("empty or non-JSON /complete response")
+        }
+        guard let accepted = dict["accepted"] as? Bool else {
+            throw CDLError.networkError(
+                "malformed /complete response: missing or non-boolean 'accepted'"
+            )
+        }
+        let token: String?
+        switch dict["attestation_token"] {
+        case nil, is NSNull:
+            token = nil
+        case let s as String:
+            token = s
+        default:
+            throw CDLError.networkError(
+                "malformed /complete response: 'attestation_token' must be string"
+            )
+        }
+        return CompleteResponse(accepted: accepted, attestationToken: token)
     }
 
     // MARK: - internals
@@ -67,6 +99,11 @@ struct RelayClient {
     }
 
     private func postRaw<R: Decodable>(_ path: String, body: Data) async throws -> R {
+        let respData = try await postRawBytes(path, body: body)
+        return try JSONDecoder().decode(R.self, from: respData)
+    }
+
+    private func postRawBytes(_ path: String, body: Data) async throws -> Data {
         guard let endpoint = URL(string: url + path) else {
             throw CDLError.networkError("invalid url: \(url + path)")
         }
@@ -79,6 +116,6 @@ struct RelayClient {
             let detail = String(data: respData, encoding: .utf8) ?? ""
             throw CDLError.networkError("HTTP \(http.statusCode): \(detail)")
         }
-        return try JSONDecoder().decode(R.self, from: respData)
+        return respData
     }
 }

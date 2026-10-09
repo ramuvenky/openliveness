@@ -27,7 +27,10 @@ struct KeychainService {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            // ThisDeviceOnly: AppAttest keyIds are hardware-bound and must
+            // not migrate to a new device via iCloud Keychain restore.
+            // Matches SigningService's accessibility.
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
         SecItemDelete(query as CFDictionary)
         let status = SecItemAdd(query as CFDictionary, nil)

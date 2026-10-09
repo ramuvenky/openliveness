@@ -56,24 +56,59 @@ public final class CDLSession {
         ws.resume()
     }
 
+    /// Overall deadline for session_acknowledged. Protects against a
+    /// WebSocket that opens cleanly but never emits a frame — URLSessionWS
+    /// `receive()` has no per-call timeout, so without this the SDK would
+    /// hang forever on a silent peer.
+    static let ackTimeoutSeconds: UInt64 = 30
+    static let ackMaxFrames = 16
+
     private func waitForAcknowledgement() async throws {
         guard let ws = webSocket else { throw CDLError.networkError("websocket not open") }
-        // Loop past heartbeats and other informational frames until the
-        // session_acknowledged frame arrives. Bounded by maxFrames so a
-        // chatty relay can't trap the SDK here forever.
-        let maxFrames = 16
-        for _ in 0..<maxFrames {
-            let message = try await ws.receive()
-            let text: String
-            switch message {
-            case .string(let s): text = s
-            case .data(let d): text = String(data: d, encoding: .utf8) ?? ""
-            @unknown default:
-                throw CDLError.networkError("unexpected websocket frame")
+        try await CDLSession.race(
+            timeoutSeconds: CDLSession.ackTimeoutSeconds,
+            timeoutError: CDLError.networkError("timeout waiting for session_acknowledged")
+        ) {
+            // Loop past heartbeats and other informational frames until the
+            // session_acknowledged frame arrives. Bounded by maxFrames so a
+            // chatty relay can't trap the SDK here forever.
+            for _ in 0..<CDLSession.ackMaxFrames {
+                let message = try await ws.receive()
+                let text: String
+                switch message {
+                case .string(let s): text = s
+                case .data(let d): text = String(data: d, encoding: .utf8) ?? ""
+                @unknown default:
+                    throw CDLError.networkError("unexpected websocket frame")
+                }
+                if CDLSession.isAcknowledgementFrame(text) { return }
             }
-            if CDLSession.isAcknowledgementFrame(text) { return }
+            throw CDLError.networkError(
+                "no session_acknowledged within \(CDLSession.ackMaxFrames) frames"
+            )
         }
-        throw CDLError.networkError("no session_acknowledged within \(maxFrames) frames")
+    }
+
+    /// Runs `work` concurrently with a sleep task; whichever completes first
+    /// wins and cancels the other. Extracted so the ack timeout can be
+    /// exercised in unit tests without a WebSocket.
+    static func race<T>(
+        timeoutSeconds: UInt64,
+        timeoutError: Error,
+        work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                throw timeoutError
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw CDLError.networkError("empty race")
+            }
+            return first
+        }
     }
 
     /// Decides whether a received WS frame is the session_acknowledged signal.

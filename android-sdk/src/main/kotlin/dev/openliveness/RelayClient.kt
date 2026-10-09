@@ -50,9 +50,23 @@ class RelayClient(baseURL: String) {
         return resp["nonce"] ?: throw CDLException("missing nonce in integrity-nonce response")
     }
 
-    suspend fun submitAttestation(sessionId: String, attestation: Map<String, Any?>): CompleteResponse {
-        val json = mapAdapter.toJson(attestation)
-        val body = postJson("/cdl/session/$sessionId/complete", json)
+    /**
+     * Submits the pre-canonicalized, signed attestation bytes. Taking a
+     * ByteArray here (not a Map) guarantees the wire bytes match what the
+     * AttestationBuilder signed — see AttestationBuilder.build.
+     */
+    suspend fun submitAttestation(sessionId: String, attestation: ByteArray): CompleteResponse {
+        val body = postBytes("/cdl/session/$sessionId/complete", attestation)
+        return parseCompleteResponse(body)
+    }
+
+    /**
+     * Parses the /complete response with explicit per-field errors so
+     * malformed responses throw CDLException rather than silently coercing
+     * to accepted=false. Extracted so the validation behavior is unit-
+     * testable without a full HTTP round-trip.
+     */
+    internal fun parseCompleteResponse(body: String): CompleteResponse {
         val parsed = mapAdapter.fromJson(body) ?: throw CDLException("empty /complete response")
         val accepted = parsed["accepted"] as? Boolean
             ?: throw CDLException("malformed /complete response: missing or non-boolean 'accepted'")
@@ -76,6 +90,20 @@ class RelayClient(baseURL: String) {
         val req = Request.Builder()
             .url(base + path)
             .post(json.toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw CDLException("HTTP ${resp.code}: $text")
+            }
+            text
+        }
+    }
+
+    private suspend fun postBytes(path: String, bytes: ByteArray): String = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url(base + path)
+            .post(bytes.toRequestBody("application/json".toMediaType()))
             .build()
         http.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()

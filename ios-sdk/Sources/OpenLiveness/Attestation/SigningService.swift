@@ -10,16 +10,31 @@ import CryptoKit
 /// The public key is DER-encoded (SPKI) and base64'd for the attestation.
 struct SigningService {
 
-    private static let keyStore = KeyStore()
+    private static let keyStoreLock = NSLock()
+    private static var cachedKeyStore: KeyStore?
 
-    static func publicKeyBase64() -> String {
-        keyStore.publicKeyDER().base64EncodedString()
+    static func publicKeyBase64() throws -> String {
+        try keyStore().publicKeyDER().base64EncodedString()
     }
 
     static func sign(_ attestation: [String: Any]) throws -> String {
         let canonical = try CanonicalJSON.encode(attestation)
-        let sig = try keyStore.sign(canonical)
+        let sig = try keyStore().sign(canonical)
         return sig.base64EncodedString()
+    }
+
+    // Lazily construct one KeyStore per process. Failures aren't cached —
+    // if the Keychain is unavailable at first call (e.g. device locked after
+    // reboot before first unlock) a later call can succeed without the SDK
+    // being stuck in a degraded state. Once a KeyStore has been built it is
+    // reused so repeated signatures don't thrash the Keychain.
+    private static func keyStore() throws -> KeyStore {
+        keyStoreLock.lock()
+        defer { keyStoreLock.unlock() }
+        if let cached = cachedKeyStore { return cached }
+        let fresh = try KeyStore()
+        cachedKeyStore = fresh
+        return fresh
     }
 
     final class KeyStore {
@@ -31,7 +46,7 @@ struct SigningService {
         private var secureEnclaveKey: SecureEnclave.P256.Signing.PrivateKey?
         private var fallbackKey: P256.Signing.PrivateKey?
 
-        init() {
+        init() throws {
             if let (type, data) = KeyStore.loadFromKeychain() {
                 switch type {
                 case KeyStore.typeSecureEnclave:
@@ -49,13 +64,14 @@ struct SigningService {
                     break
                 }
             }
-            generateAndPersist()
+            try generateAndPersist()
         }
 
-        func publicKeyDER() -> Data {
+        func publicKeyDER() throws -> Data {
             lock.lock(); defer { lock.unlock() }
             if let k = secureEnclaveKey { return k.publicKey.derRepresentation }
-            return fallbackKey!.publicKey.derRepresentation
+            guard let k = fallbackKey else { throw CDLError.keychainError }
+            return k.publicKey.derRepresentation
         }
 
         func sign(_ data: Data) throws -> Data {
@@ -64,19 +80,20 @@ struct SigningService {
             if let k = secureEnclaveKey {
                 return try k.signature(for: hash).rawRepresentation
             }
-            return try fallbackKey!.signature(for: hash).rawRepresentation
+            guard let k = fallbackKey else { throw CDLError.keychainError }
+            return try k.signature(for: hash).rawRepresentation
         }
 
-        private func generateAndPersist() {
+        private func generateAndPersist() throws {
             if SecureEnclave.isAvailable,
                let k = try? SecureEnclave.P256.Signing.PrivateKey() {
                 self.secureEnclaveKey = k
-                KeyStore.storeInKeychain(type: KeyStore.typeSecureEnclave, data: k.dataRepresentation)
+                try KeyStore.storeInKeychain(type: KeyStore.typeSecureEnclave, data: k.dataRepresentation)
                 return
             }
             let k = P256.Signing.PrivateKey()
             self.fallbackKey = k
-            KeyStore.storeInKeychain(type: KeyStore.typeSoftware, data: k.rawRepresentation)
+            try KeyStore.storeInKeychain(type: KeyStore.typeSoftware, data: k.rawRepresentation)
         }
 
         private static func loadFromKeychain() -> (type: String, data: Data)? {
@@ -95,7 +112,7 @@ struct SigningService {
             return (type, data)
         }
 
-        private static func storeInKeychain(type: String, data: Data) {
+        private static func storeInKeychain(type: String, data: Data) throws {
             let delete: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrAccount as String: keychainAccount
@@ -108,17 +125,21 @@ struct SigningService {
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             ]
-            SecItemAdd(add as CFDictionary, nil)
+            let status = SecItemAdd(add as CFDictionary, nil)
+            guard status == errSecSuccess else { throw CDLError.keychainError }
         }
 
-        /// Test-only: wipe the persisted key so the next KeyStore() call starts
-        /// from a clean slate. Not for production use.
+        /// Test-only: wipe the persisted key and the process-wide KeyStore
+        /// cache so the next call starts from a clean slate.
         static func _clearPersistedKeyForTesting() {
             let delete: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrAccount as String: keychainAccount
             ]
             SecItemDelete(delete as CFDictionary)
+            SigningService.keyStoreLock.lock()
+            SigningService.cachedKeyStore = nil
+            SigningService.keyStoreLock.unlock()
         }
     }
 }

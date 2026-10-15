@@ -1,0 +1,42 @@
+.git
+.gitignore
+.venv
+venv
+env
+ENV
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+.DS_Store
+
+# iOS / Android build artefacts
+ios-sdk/.build
+ios-sdk/.swiftpm
+ios-sdk/Package.resolved
+ios-sdk/DerivedData
+android-sdk/.gradle
+android-sdk/build
+android-sdk/gradle
+android-sdk/gradlew
+android-sdk/gradlew.bat
+android-sdk/local.properties
+
+# Datasets (mount at runtime, don't bake into image)
+benchmark/datasets/data
+
+# Model artefacts (regenerate from code)
+*.tflite
+*.joblib
+*.pkl
+*.h5
+*.onnx
+
+# Node (future web-sdk/)
+node_modules
+.turbo
+.next
+dist

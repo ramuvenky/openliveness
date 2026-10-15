@@ -1,0 +1,35 @@
+name: iOS SDK
+
+on:
+  push:
+    paths:
+      - 'ios-sdk/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'ios-sdk/**'
+      - '.github/workflows/ios.yml'
+
+jobs:
+  test:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: ios-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Resolve dependencies
+        run: swift package resolve
+
+      - name: Build (iOS Simulator)
+        run: xcodebuild build -scheme OpenLiveness -destination 'generic/platform=iOS Simulator'
+
+      - name: Test (iOS Simulator)
+        run: xcodebuild test -scheme OpenLiveness -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest'

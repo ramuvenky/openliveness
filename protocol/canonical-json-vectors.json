@@ -1,0 +1,14 @@
+[
+  { "name": "basic_sort", "input": {"b": 1, "a": "x", "c": [3, 1, 2]}, "expected": "{\"a\":\"x\",\"b\":1,\"c\":[3,1,2]}" },
+  { "name": "nested_sort", "input": {"outer": {"z": true, "a": false}}, "expected": "{\"outer\":{\"a\":false,\"z\":true}}" },
+  { "name": "integer_valued_double", "input": {"n": 1.0}, "expected": "{\"n\":1}" },
+  { "name": "fractional_double", "input": {"n": 0.85}, "expected": "{\"n\":0.850000}" },
+  { "name": "small_fractional", "input": {"n": 0.0001}, "expected": "{\"n\":0.000100}" },
+  { "name": "mixed_scores", "input": {"a": 0.85, "b": true, "c": 3.0}, "expected": "{\"a\":0.850000,\"b\":true,\"c\":3}" },
+  { "name": "null_value", "input": {"n": null}, "expected": "{\"n\":null}" },
+  { "name": "empty_object", "input": {}, "expected": "{}" },
+  { "name": "empty_array", "input": {"a": []}, "expected": "{\"a\":[]}" },
+  { "name": "control_char_escape", "input": {"s": "line\nbreak"}, "expected": "{\"s\":\"line\\nbreak\"}" },
+  { "name": "quote_escape", "input": {"s": "he said \"hi\""}, "expected": "{\"s\":\"he said \\\"hi\\\"\"}" },
+  { "name": "backslash_escape", "input": {"s": "a\\b"}, "expected": "{\"s\":\"a\\\\b\"}" }
+]

@@ -151,7 +151,7 @@
     },
     "signature": {
       "type": "string",
-      "description": "Base64-encoded ES256 signature over canonical JSON of all fields except this signature field, keys sorted alphabetically, no whitespace. Algorithm: ECDSA with P-256 curve and SHA-256 hash."
+      "description": "Base64-encoded ES256 signature over canonical JSON of all fields except this signature field. Canonical JSON rules: keys sorted alphabetically (recursive), no whitespace, UTF-8. Integer-valued finite doubles with |x| < 1e16 serialize as integers (e.g. 1.0 -> '1'); all other finite doubles serialize as fixed-point '%.6f' (e.g. 0.85 -> '0.850000'); NaN and infinity are rejected. Algorithm: ECDSA with P-256 curve and SHA-256 hash."
     }
   },
   "additionalProperties": false

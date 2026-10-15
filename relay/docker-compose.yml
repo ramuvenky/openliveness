@@ -1,0 +1,28 @@
+version: '3.8'
+services:
+  relay:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - JWT_PRIVATE_KEY_PATH=/keys/relay-private.pem
+      - JWT_PUBLIC_KEY_PATH=/keys/relay-public.pem
+      - RELAY_BASE_URL=localhost
+      - NODE_ENV=development
+      - HARDWARE_ATTESTATION=stub
+      - INTEGRITY_NONCE_SECRET=dev-secret-change-in-production
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

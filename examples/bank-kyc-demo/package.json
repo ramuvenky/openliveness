@@ -1,0 +1,22 @@
+{
+  "name": "bank-kyc-demo",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "tsx server.ts",
+    "dev": "node build.mjs && tsx server.ts"
+  },
+  "dependencies": {
+    "@openliveness/verify": "workspace:*",
+    "@openliveness/web": "workspace:*",
+    "express": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.0",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.21.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}

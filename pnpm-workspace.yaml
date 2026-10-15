@@ -1,0 +1,5 @@
+packages:
+  - 'relay'
+  - 'verify'
+  - 'web-sdk'
+  - 'examples/*'

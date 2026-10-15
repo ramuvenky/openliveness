@@ -1,0 +1,9 @@
+node_modules/
+dist/
+keys/
+*.env
+.env.*
+!.env.example
+*.google-service-account.json
+.turbo/
+examples/**/public/app.js

@@ -25,14 +25,36 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-// Keys sorted alphabetically, no whitespace. Must match the phone SDKs exactly.
+// Canonical JSON used for the ES256 signature preimage. Rules:
+//   - Keys sorted alphabetically (recursive), no whitespace, UTF-8.
+//   - Integer-valued doubles with |x| < 1e16 emit as integers ("1" not "1.0").
+//   - All other finite doubles emit as fixed-point "%.6f" ("0.85" → "0.850000").
+//   - NaN and infinity throw rather than silently become "null".
+// Must byte-match ios-sdk/CanonicalJSON.swift and android-sdk/CanonicalJson.kt;
+// the fixtures in protocol/canonical-json-vectors.json are the source of truth.
 export function canonicalize(obj: unknown): string {
-  if (typeof obj !== 'object' || obj === null) return JSON.stringify(obj);
+  if (obj === null) return 'null';
+  if (typeof obj === 'boolean') return obj ? 'true' : 'false';
+  if (typeof obj === 'string') return JSON.stringify(obj);
+  if (typeof obj === 'number') return canonicalizeNumber(obj);
   if (Array.isArray(obj)) return '[' + obj.map(canonicalize).join(',') + ']';
-  const record = obj as Record<string, unknown>;
-  const pairs = Object.keys(record)
-    .sort()
-    .filter((k) => record[k] !== undefined)
-    .map((k) => JSON.stringify(k) + ':' + canonicalize(record[k]));
-  return '{' + pairs.join(',') + '}';
+  if (typeof obj === 'object') {
+    const record = obj as Record<string, unknown>;
+    const pairs = Object.keys(record)
+      .sort()
+      .filter((k) => record[k] !== undefined)
+      .map((k) => JSON.stringify(k) + ':' + canonicalize(record[k]));
+    return '{' + pairs.join(',') + '}';
+  }
+  throw new Error(`canonicalize: unsupported type ${typeof obj}`);
+}
+
+function canonicalizeNumber(n: number): string {
+  if (!Number.isFinite(n)) {
+    throw new Error('canonicalize: non-finite number');
+  }
+  if (Number.isInteger(n) && Math.abs(n) < 1e16) {
+    return n.toString();
+  }
+  return n.toFixed(6);
 }

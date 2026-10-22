@@ -24,6 +24,11 @@ export function config() {
     sessionExpiryMinutes: Number(env.SESSION_EXPIRY_MINUTES ?? 5),
     attestationMaxAgeSeconds: Number(env.ATTESTATION_MAX_AGE_SECONDS ?? 120),
     hardwareMode: (env.HARDWARE_ATTESTATION ?? (secure ? 'enforce' : 'stub')) as 'stub' | 'enforce',
+    // Shared secret the relay uses to sign webhook bodies (HMAC-SHA256 →
+    // X-OpenLiveness-Signature). Required for webhook delivery; if unset the
+    // relay logs and skips the webhook rather than sending an unauthenticated
+    // body that a third party could forge.
+    webhookSigningSecret: env.WEBHOOK_SIGNING_SECRET || '',
     httpBase: `${secure ? 'https' : 'http'}://${hostWithPort}`,
     wsBase: `${secure ? 'wss' : 'ws'}://${hostWithPort}`,
   };

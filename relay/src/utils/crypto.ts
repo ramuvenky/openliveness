@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, timingSafeEqual } from 'crypto';
 
 // sha256hex(JSON.stringify(attestation)) style hashing
 export function sha256hex(input: string): string {
@@ -17,10 +17,36 @@ export function sha256base64url(input: string): string {
   return base64url(sha256bytes(input));
 }
 
-// Constant time string compare, safe for tokens of different length.
+// Keyed one-way hash for pseudonymizing client IPs in logs. A plain SHA-256
+// of a /32 IPv4 address covers only 2^32 inputs — a rainbow table reverses
+// it trivially. Using HMAC with a long-lived server secret turns that into
+// an attack on the secret, not an enumeration of the input space. Rotate
+// the secret periodically to invalidate cross-rotation correlation.
+export function hmacHex(secret: string, input: string): string {
+  return createHmac('sha256', secret).update(input, 'utf8').digest('hex');
+}
+
+// Constant-time string compare, safe for tokens of different length.
+//
+// The comparison is BYTE-level after a default UTF-8 encode (Buffer.from(x)
+// with no explicit encoding). Callers must pass raw tokens, not any form
+// that might differ in encoding — specifically:
+//   - Do not pre-decode a base64url token on one side and compare against
+//     the base64url form on the other; one side will be bytes, the other
+//     ASCII, and lengths will differ for the trivial case while a crafted
+//     payload could coincidentally match length and leak timing.
+//   - Do not Unicode-normalize one side (NFC/NFKC) without doing it to the
+//     other; "é" (U+00E9) and "e\u0301" compare unequal and the length
+//     short-circuit discloses that difference non-constant-time.
+// For the relay's two uses (poll_token, phone_token) both sides are random
+// base64url strings produced by crypto.randomBytes, so there is nothing to
+// normalize — but this comment pins the contract for future callers.
 export function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
+  // Different-length inputs intentionally short-circuit: timingSafeEqual
+  // itself requires equal-length buffers, so leaking "length mismatch" via
+  // early return is both unavoidable and benign for high-entropy tokens.
   if (ab.length !== bb.length) return false;
   return timingSafeEqual(ab, bb);
 }

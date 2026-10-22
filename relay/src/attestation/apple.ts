@@ -221,7 +221,12 @@ export async function verifyAppAttestAssertion(
   const signature: Buffer = decoded.signature;
   if (!authData || !signature) throw new CDLError('ERR_APPLE_ATTEST_INVALID', 'malformed assertion');
 
-  const stored = parseInt((await r.get(`cdl:device:${keyId}:counter`)) || '0', 10);
+  // parseInt returns NaN for a corrupted value; comparing anything against
+  // NaN is false, which would silently let a replayed counter through. Treat
+  // a non-finite stored value as "no prior counter known" (0) so the next
+  // valid counter still has to be strictly greater than any plausible prior.
+  const parsed = parseInt((await r.get(`cdl:device:${keyId}:counter`)) || '0', 10);
+  const stored = Number.isFinite(parsed) ? parsed : 0;
   const counter = authData.readUInt32BE(33);
   if (counter <= stored) throw new CDLError('ERR_APPLE_ATTEST_COUNTER');
 

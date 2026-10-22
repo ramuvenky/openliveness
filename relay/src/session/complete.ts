@@ -57,6 +57,20 @@ export async function completeSession(
     if (await isChallengeUsed(att.challenge_id)) throw new CDLError('ERR_CHALLENGE_REUSED');
     checkChallenge(att, session);
 
+    // 5a. Burn the challenge atomically as soon as the binding is validated,
+    // not after the expensive signature / hardware / assurance checks. Two
+    // racing submissions for the same challenge_id (an attacker replaying a
+    // captured QR, or a buggy phone sending duplicates) would otherwise each
+    // run full signature-verify / hardware-attest / X.509-chain traversal
+    // before the loser is rejected — that's CPU an attacker can burn by
+    // flooding duplicates. The atomic SETNX turns the duplicate into an
+    // O(1) Redis call. The trade: a submission whose signature later fails
+    // still burns the challenge, so the device would need a fresh session.
+    // That's acceptable because signature-verify failures are not a normal
+    // retry case (a working device won't produce bad signatures); legit
+    // retries happen on liveness fail/inconclusive, which still verify.
+    if (!(await claimChallenge(att.challenge_id))) throw new CDLError('ERR_CHALLENGE_REUSED');
+
     // 6. freshness
     checkTimestamp(att.timestamp, config().attestationMaxAgeSeconds);
 
@@ -68,9 +82,6 @@ export async function completeSession(
 
     // 9. assurance
     checkAssurance(att, session, hardwareAttested);
-
-    // 10. burn the challenge, atomically
-    if (!(await claimChallenge(att.challenge_id))) throw new CDLError('ERR_CHALLENGE_REUSED');
 
     // 11. token
     const token = await issueAttestationJWT(att, session, hardwareAttested);

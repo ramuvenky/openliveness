@@ -100,17 +100,30 @@ export async function sessionRoutes(app: FastifyInstance) {
         await updateSession(session.session_id, { state });
       }
 
+      // The raw token lives in process memory only (see tokenCache). After
+      // its 15-minute TTL expires (or across a relay restart) the token is
+      // gone, which is a legitimate end-state — not an internal error —
+      // but silently returning attestation_token=undefined would resolve
+      // the web-sdk's polling promise with a nullish token and look like a
+      // happy path to callers. Return an explicit error_code so the SDK
+      // can distinguish "stop polling, token's gone" from "keep waiting".
+      let attestationToken: string | undefined;
+      if (state === 'complete') {
+        attestationToken = getCachedToken(session.session_id);
+        if (!attestationToken) {
+          throw new CDLError(
+            'ERR_ATTESTATION_TOKEN_UNAVAILABLE',
+            'attestation token is no longer retrievable; retrieve it from the WS session_complete frame at completion time',
+          );
+        }
+      }
+
       return {
         session_id: session.session_id,
         state,
         liveness_decision: session.liveness_decision,
         assurance_level: session.assurance_level,
-        // The raw token lives in process memory only (see tokenCache); after
-        // its 15-minute TTL expires /status reports the session state but
-        // not the token. A Redis dump cannot recover the token because only
-        // its SHA-256 (jwt_hash) is persisted.
-        attestation_token:
-          state === 'complete' ? getCachedToken(session.session_id) : undefined,
+        attestation_token: attestationToken,
         created_at: session.created_at,
         updated_at: session.updated_at,
         expires_at: session.expires_at,

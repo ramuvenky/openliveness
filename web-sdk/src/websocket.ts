@@ -20,7 +20,18 @@ export function waitForResult(
   return new Promise((resolve, reject) => {
     if (typeof WebSocket === 'undefined') return reject(fallbackError('no WebSocket'));
 
-    const ws = new WebSocket(`${wsUrl}?token=${encodeURIComponent(pollToken)}`);
+    // The pollToken used to ride on the URL as ?token=, which lands it in
+    // LB / CDN / Fastify access logs. We now open the WS unauthenticated
+    // and send {type:"auth",token} as the first frame — the server closes
+    // the socket after 5s if the frame doesn't arrive.
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      try {
+        ws.send(JSON.stringify({ type: 'auth', token: pollToken }));
+      } catch {
+        // onerror / onclose will fire next tick
+      }
+    };
     let settled = false;
     const finish = (fn: () => void) => {
       if (settled) return;

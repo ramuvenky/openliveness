@@ -163,7 +163,7 @@ export async function callWebhook(
   const signature = signWebhookBody(cfg.webhookSigningSecret, body);
 
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -172,8 +172,27 @@ export async function callWebhook(
       signal: AbortSignal.timeout(5000),
       body,
     });
+    if (!res.ok) {
+      // Non-2xx is logged separately from a hard failure (DNS, TCP reset,
+      // 5s timeout). Delivery is still fire-and-forget today: see TODO
+      // below for the retry queue work tracked outside this PR.
+      log.warn(
+        { session_id: session.session_id, status: res.status },
+        'webhook delivery non-2xx',
+      );
+    }
   } catch {
     // a dead webhook must never fail the session
     log.warn({ session_id: session.session_id }, 'webhook delivery failed');
   }
+  // TODO(L7-retry-queue): fire-and-forget is adequate while RPs are expected
+  // to reconcile via /status, but at-least-once semantics belong on the
+  // roadmap. The sketch is: on non-2xx or network failure, enqueue
+  // {session_id, body, signature, attempts} into a Redis stream (XADD) with
+  // a consumer group that re-POSTs with exponential backoff + jitter and
+  // caps at ~24h / 10 attempts. Needs: idempotency on the RP side (we
+  // already include session_id + timestamp), a DLQ for permanent 4xx, and
+  // a metric for queue depth. Tracked outside this PR because it's a
+  // meaningful operational surface (new Redis key family, new metrics,
+  // RP-facing docs) that deserves its own review.
 }

@@ -31,7 +31,10 @@ describe('jwt and jwks', () => {
     const jwks = createLocalJWKSet((await getJwks()) as never);
 
     const { payload } = await jwtVerify(token, jwks, {
-      issuer: 'relay.test',
+      // L5: iss is normalized to a URL so OIDC / JOSE validators that expect
+      // StringOrURI can parse it. Default port 3000 appears because PORT is
+      // unset in this test environment and NODE_ENV != 'production'.
+      issuer: 'http://relay.test:3000',
       audience: 'example-bank.com',
     });
     expect(payload.cdl_decision).toBe('pass');

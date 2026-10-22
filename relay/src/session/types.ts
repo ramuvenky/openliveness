@@ -36,7 +36,14 @@ export interface CDLSession {
 
 export const CHALLENGE_STEPS = ['blink', 'look_left', 'look_right', 'smile', 'nod'] as const;
 
-const score = z.number().min(0).max(1);
+// Scores feed the canonical-JSON preimage used to verify the device signature,
+// and canonicalize() throws on NaN / ±Infinity (its contract with the mobile
+// SDKs is "finite only"). We reject non-finite numbers up-front at the schema
+// boundary so a malformed body never reaches canonicalize — the implicit
+// NaN-fails-comparisons behavior of .min / .max would still catch it, but
+// relying on that is brittle: a future refactor dropping the range check
+// would silently open the door. `.finite()` is the explicit contract.
+const score = z.number().finite().min(0).max(1);
 
 export const attestationSchema = z
   .object({

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { safeEqual } from '../utils/crypto';
-import { getRedis, loadSession, updateSession } from '../session/store';
+import { getRedis, loadSession, sessionTtlSeconds, updateSession } from '../session/store';
 import { getCachedToken } from '../session/tokenCache';
 import { addBrowser, addPhone, toBrowser } from './hub';
 import { now, PhoneInbound, PhoneMessage } from './messages';
@@ -12,8 +12,17 @@ function reply(ws: WebSocket, msg: PhoneMessage) {
   ws.send(JSON.stringify(msg));
 }
 
+const BROWSER_AUTH_TIMEOUT_MS = 5000;
+
 export async function registerWebsocketRoutes(app: FastifyInstance) {
-  // Browser side: needs the poll token, passed as ?token= since browsers cannot set WS headers.
+  // Browser side. The poll_token used to arrive on the URL as ?token= but
+  // that landed the token in LB/CDN access logs. We now accept the WS open
+  // and wait for the browser's first frame to carry {type:"auth",token}.
+  // The connection is forcibly closed after BROWSER_AUTH_TIMEOUT_MS if the
+  // browser never sends it, so the pre-auth attack surface is bounded.
+  // Query-string ?token= remains supported for one release as a transition
+  // so older web-sdk clients don't break; the server logs when it falls
+  // back to it so operators can see when it's safe to remove.
   app.get<{ Params: { id: string }; Querystring: { token?: string } }>(
     '/cdl/session/:id/ws',
     { websocket: true },
@@ -22,7 +31,39 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
       const { id } = req.params;
       const session = await loadSession(id);
 
-      if (!session || !req.query.token || !safeEqual(session.poll_token, req.query.token)) {
+      const authenticated = await (async () => {
+        if (!session) return false;
+        if (req.query.token) {
+          req.log.warn({ session_id: id }, 'browser WS used legacy ?token= — upgrade the web-sdk');
+          return safeEqual(session.poll_token, req.query.token);
+        }
+        return await new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => {
+            ws.off('message', onMessage);
+            resolve(false);
+          }, BROWSER_AUTH_TIMEOUT_MS);
+          const onMessage = (raw: unknown) => {
+            clearTimeout(timer);
+            ws.off('message', onMessage);
+            try {
+              const parsed = JSON.parse(String(raw));
+              if (
+                parsed?.type === 'auth' &&
+                typeof parsed.token === 'string' &&
+                safeEqual(session.poll_token, parsed.token)
+              ) {
+                return resolve(true);
+              }
+            } catch {
+              // fall through to reject
+            }
+            resolve(false);
+          };
+          ws.on('message', onMessage);
+        });
+      })();
+
+      if (!authenticated) {
         ws.send(
           JSON.stringify({
             type: 'error',
@@ -34,10 +75,16 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
         ws.close();
         return;
       }
+      if (!session) return; // unreachable but narrows the type
 
       addBrowser(id, ws);
 
-      // Late joiners still get the outcome if it already happened.
+      // Late joiners still get the outcome if it already happened. The
+      // original handler only re-sent phone_connected and session_complete;
+      // if the browser reconnected after a failed or expired session it
+      // would sit silent until the timer below fired (which only triggers
+      // on 'initiated'). Resend the terminal frame for every post-initiated
+      // state so the browser can render the right outcome on reconnect.
       if (session.state === 'phone_connected') {
         ws.send(JSON.stringify({ type: 'phone_connected', timestamp: now() }));
       }
@@ -45,7 +92,11 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
         // The token is held only in process memory (see tokenCache). Late
         // joiners after the 15-minute window will see the completion but
         // not the token — by that point they'd have had to retrieve it
-        // through the live session_complete push or /status earlier.
+        // through the live session_complete push or /status earlier. If
+        // the token is gone, the browser gets no misleading complete frame
+        // (that would resolve the SDK promise with token=undefined); it
+        // sees the empty WS and should fall back to /status, which the
+        // M4 fix now hard-errors so the SDK can surface it correctly.
         const token = getCachedToken(session.session_id);
         if (token) {
           ws.send(
@@ -57,8 +108,30 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
               timestamp: now(),
             }),
           );
-          return;
         }
+        return;
+      }
+      if (session.state === 'failed') {
+        ws.send(
+          JSON.stringify({
+            type: 'session_failed',
+            reason: 'liveness_check_failed',
+            liveness_decision: session.liveness_decision,
+            retry_allowed: true,
+            timestamp: now(),
+          }),
+        );
+        return;
+      }
+      if (session.state === 'expired') {
+        ws.send(
+          JSON.stringify({
+            type: 'session_expired',
+            reason: 'session_expired',
+            timestamp: now(),
+          }),
+        );
+        return;
       }
 
       // Tell the browser if nobody scans the code in time.
@@ -111,7 +184,11 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
       const redis = getRedis();
       const countKey = `cdl:session:${id}:phone_connections`;
       const count = await redis.incr(countKey);
-      await redis.expire(countKey, 24 * 3600);
+      // Keep the counter aligned with the session's own TTL (expires_at + grace)
+      // rather than pinning it to 24h. A leaked session_id otherwise lets an
+      // attacker burn phone-connection quota for a full day after the session
+      // is logically dead.
+      await redis.expire(countKey, sessionTtlSeconds(session.expires_at));
       if (count > MAX_PHONE_CONNECTIONS) {
         reply(ws, { type: 'session_invalid', reason: 'too_many_reconnects', timestamp: now() });
         ws.close();

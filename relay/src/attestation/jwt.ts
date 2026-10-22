@@ -27,7 +27,11 @@ export async function issueAttestationJWT(
 ): Promise<string> {
   const s = attestation.layer_scores;
   return new SignJWT({
-    cdl_version: '1.0',
+    // Mirror the mobile SDK's declared attestation.version instead of a
+    // hard-coded '1.0'. If an older SDK keeps sending v1.0 after we've
+    // bumped the schema, the RP needs to see v1.0 in the JWT so its
+    // compatibility checks match reality rather than this handler's build.
+    cdl_version: attestation.version,
     cdl_decision: attestation.liveness_decision,
     cdl_assurance: attestation.assurance_level,
     cdl_device_platform: attestation.device_platform,

@@ -76,7 +76,13 @@ export const attestationSchema = z
         motion_detected: z.boolean(),
         front_camera_confirmed: z.boolean(),
       })
-      .strict(),
+      // Passthrough (not .strict()) so a newer mobile SDK that adds signal
+      // fields (ambient_temperature, glare_detected, …) can roll out without
+      // the server rejecting the whole attestation. layer_scores stays strict
+      // because unknown score keys would change the canonicalize preimage and
+      // break signature verification; ambient_conditions is read for logging
+      // and advisory JWT claims only, so new keys are safe to ignore here.
+      .passthrough(),
     public_key: z.string().min(1),
     signature: z.string().min(1),
   })

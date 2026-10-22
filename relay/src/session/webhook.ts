@@ -23,7 +23,7 @@ import { CDLAttestation, CDLSession } from './types';
 
 export function normalizeWebhookUrl(
   raw: string,
-  env: string = config().nodeEnv,
+  allowLoopback: boolean = config().allowLoopbackWebhooks,
 ): string | null {
   let url: URL;
   try {
@@ -32,7 +32,10 @@ export function normalizeWebhookUrl(
     return null;
   }
   if (url.protocol === 'https:') return url.toString();
-  if (url.protocol === 'http:' && env !== 'production' && isLoopbackHostname(url.hostname)) {
+  // Loopback http is a deliberate dev-only opt-in via ALLOW_LOOPBACK_WEBHOOKS.
+  // The previous check used NODE_ENV !== 'production', which silently opened
+  // SSRF to 127.0.0.1 whenever NODE_ENV was unset / misspelled / "staging".
+  if (url.protocol === 'http:' && allowLoopback && isLoopbackHostname(url.hostname)) {
     return url.toString();
   }
   return null;
@@ -121,7 +124,8 @@ export async function callWebhook(
 ) {
   if (!session.webhook_url) return;
   const cfg = config();
-  const url = normalizeWebhookUrl(session.webhook_url, cfg.nodeEnv);
+  const allowLoopback = cfg.allowLoopbackWebhooks;
+  const url = normalizeWebhookUrl(session.webhook_url, allowLoopback);
   if (!url) {
     log.warn(
       { session_id: session.session_id, webhook_url: session.webhook_url },
@@ -130,7 +134,6 @@ export async function callWebhook(
     return;
   }
   const parsed = new URL(url);
-  const allowLoopback = cfg.nodeEnv !== 'production';
   try {
     await resolveAndCheckHost(parsed.hostname, allowLoopback);
   } catch (e) {

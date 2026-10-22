@@ -45,6 +45,13 @@ export function config() {
     // and get fresh per-"IP" rate-limit buckets. Default is off; set
     // TRUST_PROXY=true behind a trusted LB / ingress / Fastly / etc.
     trustProxy: env.TRUST_PROXY === 'true',
+    // Loopback webhooks (http://localhost, http://127.0.0.1, http://::1) are
+    // a dev-only convenience: an RP running the relay locally wants to post
+    // to a local receiver without TLS. Historically this was inferred from
+    // NODE_ENV !== 'production', but NODE_ENV being unset or misspelled
+    // ("prod", "staging") then quietly opened an SSRF path to loopback in a
+    // real deploy. Require an explicit opt-in: ALLOW_LOOPBACK_WEBHOOKS=true.
+    allowLoopbackWebhooks: env.ALLOW_LOOPBACK_WEBHOOKS === 'true',
     httpBase: `${secure ? 'https' : 'http'}://${hostWithPort}`,
     wsBase: `${secure ? 'wss' : 'ws'}://${hostWithPort}`,
   };

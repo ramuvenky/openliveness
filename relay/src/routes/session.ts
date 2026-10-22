@@ -72,6 +72,12 @@ export async function sessionRoutes(app: FastifyInstance) {
 
     return {
       session_id: sessionId,
+      // Echoed so the browser can cross-check the JWT's `aud` matches what
+      // it asked for before forwarding the token to its backend. The server
+      // ultimately binds this to the JWT aud (see attestation/jwt.ts), so
+      // returning it here is advisory — not authoritative — but lets a
+      // defensive caller fail fast without re-parsing the token.
+      relying_party: body.relying_party,
       challenge_id: challengeId,
       challenge_sequence: sequence,
       qr_payload: Buffer.from(JSON.stringify(qr), 'utf8').toString('base64'),

@@ -9,70 +9,182 @@ import {
 import { makeSession } from './helpers';
 import type { CDLAttestation } from '../src/session/types';
 
-// Locks in the T2 fixes: webhook URLs may never leak attestation tokens to
-// non-TLS endpoints, SSRF targets (cloud metadata, RFC1918, loopback in
-// prod), and bodies must be HMAC-signed so a third party can't forge
-// cdl.session.complete events.
+// Locks in the T2 + M3 fixes: webhook URLs may never leak attestation tokens
+// to non-TLS endpoints, SSRF targets (cloud metadata, RFC1918, loopback by
+// default), and bodies must be HMAC-signed so a third party can't forge
+// cdl.session.complete events. Loopback http is only accepted when an
+// explicit `allowLoopback=true` flag is passed in — the previous NODE_ENV
+// heuristic silently opened SSRF when the env was unset or misspelled.
 
 const originalEnv = process.env.NODE_ENV;
 
 afterEach(() => {
   process.env.NODE_ENV = originalEnv;
   delete process.env.WEBHOOK_SIGNING_SECRET;
+  delete process.env.ALLOW_LOOPBACK_WEBHOOKS;
   vi.restoreAllMocks();
 });
 
 describe('normalizeWebhookUrl — scheme policy', () => {
-  it('accepts https in production', () => {
-    expect(normalizeWebhookUrl('https://example.com/hook', 'production')).toBe(
+  it('accepts https (loopback flag irrelevant)', () => {
+    expect(normalizeWebhookUrl('https://example.com/hook', false)).toBe(
       'https://example.com/hook',
     );
   });
 
   it('adds https:// to bare host', () => {
-    expect(normalizeWebhookUrl('example.com/hook', 'production')).toBe(
+    expect(normalizeWebhookUrl('example.com/hook', false)).toBe(
       'https://example.com/hook',
     );
   });
 
-  it('rejects http in production', () => {
-    expect(normalizeWebhookUrl('http://example.com/hook', 'production')).toBeNull();
+  it('rejects http even for public hosts when loopback is allowed', () => {
+    expect(normalizeWebhookUrl('http://example.com/hook', true)).toBeNull();
   });
 
-  it('allows http://localhost in development', () => {
-    expect(normalizeWebhookUrl('http://localhost:8080/x', 'development')).toBe(
+  it('rejects http in the default (loopback-disallowed) config', () => {
+    expect(normalizeWebhookUrl('http://example.com/hook', false)).toBeNull();
+  });
+
+  it('allows http://localhost only when allowLoopback=true', () => {
+    expect(normalizeWebhookUrl('http://localhost:8080/x', true)).toBe(
       'http://localhost:8080/x',
     );
+    expect(normalizeWebhookUrl('http://localhost:8080/x', false)).toBeNull();
   });
 
-  it('allows http://127.0.0.1 in development', () => {
-    expect(normalizeWebhookUrl('http://127.0.0.1/x', 'development')).toBe(
-      'http://127.0.0.1/x',
-    );
+  it('allows http://127.0.0.1 only when allowLoopback=true', () => {
+    expect(normalizeWebhookUrl('http://127.0.0.1/x', true)).toBe('http://127.0.0.1/x');
+    expect(normalizeWebhookUrl('http://127.0.0.1/x', false)).toBeNull();
   });
 
-  it('rejects http://non-loopback even in development', () => {
-    expect(normalizeWebhookUrl('http://example.com/hook', 'development')).toBeNull();
+  it('allows http://[::1] only when allowLoopback=true', () => {
+    expect(normalizeWebhookUrl('http://[::1]/x', true)).toBe('http://[::1]/x');
+    expect(normalizeWebhookUrl('http://[::1]/x', false)).toBeNull();
+  });
+
+  it('rejects http://non-loopback even when allowLoopback=true', () => {
+    expect(normalizeWebhookUrl('http://example.com/hook', true)).toBeNull();
   });
 
   it('rejects file:// scheme', () => {
-    expect(normalizeWebhookUrl('file:///etc/passwd', 'production')).toBeNull();
+    expect(normalizeWebhookUrl('file:///etc/passwd', true)).toBeNull();
   });
 
   it('rejects ftp:// scheme', () => {
-    expect(normalizeWebhookUrl('ftp://example.com/x', 'production')).toBeNull();
+    expect(normalizeWebhookUrl('ftp://example.com/x', true)).toBeNull();
   });
 
   it('rejects javascript:// scheme', () => {
-    expect(normalizeWebhookUrl('javascript://example.com/x', 'production')).toBeNull();
+    expect(normalizeWebhookUrl('javascript://example.com/x', true)).toBeNull();
   });
 
   it('rejects ws:// scheme', () => {
-    expect(normalizeWebhookUrl('ws://example.com/x', 'production')).toBeNull();
+    expect(normalizeWebhookUrl('ws://example.com/x', true)).toBeNull();
   });
 
   it('rejects garbage input', () => {
-    expect(normalizeWebhookUrl(':::not a url', 'production')).toBeNull();
+    expect(normalizeWebhookUrl(':::not a url', true)).toBeNull();
+  });
+});
+
+describe('M3 — ALLOW_LOOPBACK_WEBHOOKS gating in callWebhook', () => {
+  // callWebhook reads config().allowLoopbackWebhooks, which is derived from
+  // the env on each call. These tests pin the end-to-end behavior rather
+  // than the pure normalize helper above.
+  const att: CDLAttestation = {
+    version: '1.0',
+    session_id: 'ignored',
+    challenge_id: 'ignored',
+    challenge_response: 'blink,look_left,smile',
+    timestamp: new Date().toISOString(),
+    liveness_decision: 'pass',
+    assurance_level: 'software_only',
+    layer_scores: {
+      layer2_challenge_completed: true,
+      layer2_challenge_score: 0.9,
+      layer3_pulse_detected: true,
+      layer3_bpm_in_range: true,
+      layer3_rppg_confidence: 0.9,
+      layer4_lbp_score: 0.9,
+      layer4_fourier_score: 0.9,
+      layer5_behavioral_score: 0.9,
+      layer5_microsaccade_detected: true,
+    },
+    device_platform: 'android',
+    device_id_hash: 'abc',
+    ambient_conditions: {
+      low_light_detected: false,
+      motion_detected: false,
+      front_camera_confirmed: true,
+    },
+    public_key: 'ignored',
+    signature: 'ignored',
+  };
+
+  const log = {
+    warn: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    trace: vi.fn(),
+    fatal: vi.fn(),
+    child: () => log,
+    level: 'info',
+    silent: vi.fn(),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+
+  it('rejects loopback webhook when ALLOW_LOOPBACK_WEBHOOKS is unset', async () => {
+    delete process.env.ALLOW_LOOPBACK_WEBHOOKS;
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
+    const warn = vi.fn();
+    const l = { ...log, warn };
+    await callWebhook(
+      makeSession({ webhook_url: 'http://127.0.0.1:9000/x' }),
+      'tok',
+      att,
+      false,
+      l,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/scheme not allowed/),
+    );
+  });
+
+  it('rejects loopback webhook when NODE_ENV=development alone (no explicit opt-in)', async () => {
+    // The previous behavior accepted loopback whenever NODE_ENV !== 'production'.
+    // That silently opened SSRF whenever NODE_ENV was unset or misspelled.
+    // Confirm that NODE_ENV alone is no longer sufficient.
+    process.env.NODE_ENV = 'development';
+    delete process.env.ALLOW_LOOPBACK_WEBHOOKS;
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
+    await callWebhook(
+      makeSession({ webhook_url: 'http://127.0.0.1:9000/x' }),
+      'tok',
+      att,
+      false,
+      log,
+    );
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('accepts loopback webhook only when ALLOW_LOOPBACK_WEBHOOKS=true', async () => {
+    process.env.ALLOW_LOOPBACK_WEBHOOKS = 'true';
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
+    await callWebhook(
+      makeSession({ webhook_url: 'http://127.0.0.1:9000/x' }),
+      'tok',
+      att,
+      false,
+      log,
+    );
+    expect(fetchSpy).toHaveBeenCalledOnce();
   });
 });
 

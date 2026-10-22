@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { createPublicKey } from 'crypto';
+import { createPublicKey, randomUUID } from 'crypto';
 import { SignJWT, importPKCS8, exportJWK, importSPKI, KeyLike } from 'jose';
 import { config } from '../config';
 import { CDLAttestation, CDLSession } from '../session/types';
@@ -54,6 +54,11 @@ export async function issueAttestationJWT(
     .setIssuer(config().issuer)
     .setAudience(session.relying_party)
     .setSubject(session.session_id)
+    // jti is a random per-token UUID. sub already uniquely identifies a
+    // session, so an RP can dedupe on either, but jti gives downstream
+    // "have I seen this exact token before?" caches a canonical key even
+    // if a buggy relay ever issued twice for the same session.
+    .setJti(randomUUID())
     .setExpirationTime('15m')
     .sign(await getPrivateKey());
 }

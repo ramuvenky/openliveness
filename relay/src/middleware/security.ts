@@ -32,6 +32,21 @@ export async function registerSecurity(app: FastifyInstance) {
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof CDLError) {
+      // For codes whose detailed message would describe which attestation
+      // sub-check failed (certificate validity window / rpIdHash / key-id
+      // mismatch / nonce / signature …), send a generic client message and
+      // keep the raw text server-side only. Each distinct message would
+      // otherwise serve as a free oracle for a hostile RP probing the
+      // verification pipeline.
+      if (OPAQUE_ERROR_CODES.has(err.code)) {
+        req.log.warn(
+          { error_code: err.code, raw_message: err.message },
+          'opaque error returned to client',
+        );
+        return reply
+          .status(err.status)
+          .send({ error_code: err.code, message: 'attestation rejected' });
+      }
       return reply.status(err.status).send({ error_code: err.code, message: err.message });
     }
     const status = (err as { statusCode?: number }).statusCode;
@@ -63,6 +78,20 @@ export async function registerSecurity(app: FastifyInstance) {
     return reply.status(500).send({ error_code: 'ERR_INTERNAL', message: 'internal error' });
   });
 }
+
+// Error codes whose detailed `message` string would describe internal
+// attestation sub-checks (which cert extension failed, which hash mismatched,
+// which counter was out of range, …). We keep the specific error_code so the
+// SDK can branch, but collapse the human-readable message to a generic string
+// to avoid handing a hostile RP a per-check oracle. Exported for tests.
+export const OPAQUE_ERROR_CODES = new Set([
+  'ERR_APPLE_ATTEST_INVALID',
+  'ERR_APPLE_ATTEST_COUNTER',
+  'ERR_GOOGLE_INTEGRITY_INVALID',
+  'ERR_GOOGLE_INTEGRITY_NONCE',
+  'ERR_GOOGLE_INTEGRITY_LOW',
+  'ERR_INVALID_SIGNATURE',
+]);
 
 // Exported for tests. The regex blacklist is intentionally conservative — if
 // a legitimate validation message happens to match the path pattern, the

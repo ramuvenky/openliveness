@@ -130,6 +130,49 @@ describe('M7 — finite-number contract end-to-end', () => {
   });
 });
 
+// L2 — ambient_conditions moved to .passthrough() so a newer mobile SDK that
+// adds signal fields can roll out without the relay rejecting the whole
+// attestation. layer_scores stays .strict() because unknown score keys would
+// change the canonicalize preimage and break signature verification.
+describe('L2 — ambient_conditions passthrough vs layer_scores strict', () => {
+  it('accepts an attestation with an unknown ambient_conditions field (passthrough)', async () => {
+    const att = await makeAttestation();
+    const extended = {
+      ...att,
+      ambient_conditions: {
+        ...att.ambient_conditions,
+        glare_detected: true,
+        ambient_temperature_c: 21.5,
+      },
+    };
+    const parsed = attestationSchema.safeParse(extended);
+    expect(parsed.success).toBe(true);
+    // The new fields survive the parse so webhook consumers / logs can see them.
+    if (parsed.success) {
+      const ac = parsed.data.ambient_conditions as Record<string, unknown>;
+      expect(ac.glare_detected).toBe(true);
+      expect(ac.ambient_temperature_c).toBe(21.5);
+    }
+  });
+
+  it('still rejects an attestation with an unknown layer_scores field (strict)', async () => {
+    const att = await makeAttestation();
+    const tampered = {
+      ...att,
+      layer_scores: { ...att.layer_scores, layer_shadow_score: 0.42 },
+    };
+    const parsed = attestationSchema.safeParse(tampered);
+    expect(parsed.success).toBe(false);
+  });
+
+  it('still rejects an attestation with an unknown top-level field (outer strict)', async () => {
+    const att = await makeAttestation();
+    const tampered = { ...att, undocumented_claim: true };
+    const parsed = attestationSchema.safeParse(tampered);
+    expect(parsed.success).toBe(false);
+  });
+});
+
 describe('M8 — sanitizeClientMessage', () => {
   it('passes through a benign validation message unchanged', () => {
     expect(sanitizeClientMessage('body/relying_party Required')).toBe('body/relying_party Required');

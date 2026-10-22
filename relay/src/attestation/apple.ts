@@ -7,6 +7,28 @@ import { getRedis } from '../session/store';
 
 const YEAR = 365 * 24 * 3600;
 
+// Atomic compare-and-set on the App Attest signCount. ioredis `eval` runs the
+// script server-side so no two concurrent assertions can both read "100" and
+// both write "101". The script tolerates a corrupted (non-numeric) stored
+// value by treating it as 0 — matches the Number.isFinite guard in the TS
+// callers so a Redis-level glitch cannot silently open a replay window.
+export const COUNTER_CAS_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+local cur = 0
+if raw then
+  local n = tonumber(raw)
+  if n then cur = n end
+end
+local new = tonumber(ARGV[1])
+if new == nil then return 0 end
+if new > cur then
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+  return 1
+else
+  return 0
+end
+`;
+
 // Apple App Attest certificate extension (1.2.840.113635.100.8.2) DER body:
 // first subid is 1.2 → 0x2a; the rest base-128.
 const APPLE_ATTEST_EXT_OID = Buffer.from([
@@ -221,14 +243,7 @@ export async function verifyAppAttestAssertion(
   const signature: Buffer = decoded.signature;
   if (!authData || !signature) throw new CDLError('ERR_APPLE_ATTEST_INVALID', 'malformed assertion');
 
-  // parseInt returns NaN for a corrupted value; comparing anything against
-  // NaN is false, which would silently let a replayed counter through. Treat
-  // a non-finite stored value as "no prior counter known" (0) so the next
-  // valid counter still has to be strictly greater than any plausible prior.
-  const parsed = parseInt((await r.get(`cdl:device:${keyId}:counter`)) || '0', 10);
-  const stored = Number.isFinite(parsed) ? parsed : 0;
   const counter = authData.readUInt32BE(33);
-  if (counter <= stored) throw new CDLError('ERR_APPLE_ATTEST_COUNTER');
 
   const clientData = sessionId + challengeId + livenessDecision;
   const clientDataHash = createHash('sha256').update(clientData).digest();
@@ -238,8 +253,19 @@ export async function verifyAppAttestAssertion(
   const pem = await getStoredPublicKey(keyId);
   const v = createVerify('SHA256');
   v.update(nonce);
+  // Verify the signature BEFORE touching the counter. The counter is persisted
+  // atomically via the Lua CAS below; running the CAS on an unverified
+  // submission would let an attacker poison the stored counter by sending
+  // garbage with an inflated signCount, locking the real device out.
   if (!v.verify(pem, signature)) throw new CDLError('ERR_APPLE_ATTEST_INVALID');
 
-  await r.set(`cdl:device:${keyId}:counter`, String(counter), 'EX', YEAR);
+  const ok = (await r.eval(
+    COUNTER_CAS_SCRIPT,
+    1,
+    `cdl:device:${keyId}:counter`,
+    String(counter),
+    String(YEAR),
+  )) as number;
+  if (ok !== 1) throw new CDLError('ERR_APPLE_ATTEST_COUNTER');
   return true;
 }

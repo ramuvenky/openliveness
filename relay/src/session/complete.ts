@@ -57,34 +57,31 @@ export async function completeSession(
     if (await isChallengeUsed(att.challenge_id)) throw new CDLError('ERR_CHALLENGE_REUSED');
     checkChallenge(att, session);
 
-    // 5a. Burn the challenge atomically as soon as the binding is validated,
-    // not after the expensive signature / hardware / assurance checks. Two
-    // racing submissions for the same challenge_id (an attacker replaying a
-    // captured QR, or a buggy phone sending duplicates) would otherwise each
-    // run full signature-verify / hardware-attest / X.509-chain traversal
-    // before the loser is rejected — that's CPU an attacker can burn by
-    // flooding duplicates. The atomic SETNX turns the duplicate into an
-    // O(1) Redis call. The trade: a submission whose signature later fails
-    // still burns the challenge, so the device would need a fresh session.
-    // That's acceptable because signature-verify failures are not a normal
-    // retry case (a working device won't produce bad signatures); legit
-    // retries happen on liveness fail/inconclusive, which still verify.
-    if (!(await claimChallenge(att.challenge_id))) throw new CDLError('ERR_CHALLENGE_REUSED');
-
     // 6. freshness
     checkTimestamp(att.timestamp, config().attestationMaxAgeSeconds);
 
-    // 7. signature
+    // 7. signature — verified BEFORE burning the challenge so a legit device
+    // whose submission happens to fail signature verification (encoding bug,
+    // transient key rotation) is not punished by losing its challenge. ECDSA
+    // verify is a sub-millisecond operation; the expensive hardware proof
+    // still happens after the SETNX, so a flood of duplicate replays can't
+    // consume the full attestation pipeline.
     if (!(await verifyAttestationSignature(att))) throw new CDLError('ERR_INVALID_SIGNATURE');
 
+    // 7a. Burn the challenge atomically. SETNX makes two racing submissions
+    // for the same challenge_id resolve to exactly one winner, and the
+    // signature check above ensures only submissions that could plausibly
+    // be from the real device get a chance to burn it.
+    if (!(await claimChallenge(att.challenge_id))) throw new CDLError('ERR_CHALLENGE_REUSED');
+
     // 8. hardware proof
-    const hardwareAttested = await verifyHardware(att);
+    const hardware = await verifyHardware(att, session);
 
     // 9. assurance
-    checkAssurance(att, session, hardwareAttested);
+    checkAssurance(att, session, hardware.attested);
 
     // 11. token
-    const token = await issueAttestationJWT(att, session, hardwareAttested);
+    const token = await issueAttestationJWT(att, session, hardware.attested);
     // The raw token is deliberately NOT persisted in Redis: a snapshot leak
     // would otherwise exfiltrate every live attestation JWT. Instead we
     // persist only its hash (for audit / later verification) and park the
@@ -123,7 +120,7 @@ export async function completeSession(
     toPhone(sessionId, { type: 'attestation_received', timestamp: now() });
 
     // 14. webhook, not awaited so a slow receiver cannot hold the phone up
-    void callWebhook({ ...session, assurance_level: att.assurance_level }, token, att, hardwareAttested, log);
+    void callWebhook({ ...session, assurance_level: att.assurance_level }, token, att, hardware.attested, log);
 
     return { token, decision: att.liveness_decision };
   } catch (e) {

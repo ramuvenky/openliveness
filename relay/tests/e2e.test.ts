@@ -141,6 +141,17 @@ describe.skipIf(!available)('relay end to end', () => {
     expect(qr.phone_token).toMatch(/^[A-Za-z0-9_-]{20,}$/);
   });
 
+  // L4 — initiate response echoes the relying_party the caller asked for so
+  // the browser can cross-check the JWT's `aud` matches *before* forwarding
+  // the token to its backend. The server also binds this to the JWT aud, so
+  // this echo is advisory — not authoritative — but lets a defensive caller
+  // fail fast without parsing the token.
+  it('L4: initiate response echoes relying_party', async () => {
+    const { res, body } = await initiate();
+    expect(res.status).toBe(200);
+    expect(body.relying_party).toBe('example-bank.com');
+  });
+
   it('rejects a phone WS connect without the capability token', async () => {
     const { body: s } = await initiate();
     const url = `${wsBase}/cdl/session/${s.session_id}/device`;
@@ -273,6 +284,35 @@ describe.skipIf(!available)('relay end to end', () => {
     const res = await complete(s.session_id, { ...att, liveness_decision: 'pass' });
     expect(res.status).toBe(400);
     expect(((await res.json()) as Record<string, any>).error_code).toBe('ERR_INVALID_SIGNATURE');
+  });
+
+  // M1 — signature verification must run BEFORE the challenge is burned.
+  // Previously, a legit device whose submission happened to arrive with a bad
+  // signature (encoding bug, transient key rotation) would still burn the
+  // challenge, forcing the real user to re-initiate. The current order
+  // (verify then burn) means a retry with the same challenge still works.
+  it('M1: a bad-signature submission does NOT burn the challenge; a legit retry still succeeds', async () => {
+    const { body: s } = await initiate();
+    (await open(deviceUrl(s))).close();
+
+    const legit = await sign(s);
+    // Flip liveness_decision after signing to simulate a bad signature.
+    const tampered = { ...legit, liveness_decision: 'fail' as const };
+    const bad = await complete(s.session_id, tampered);
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as Record<string, any>).error_code).toBe('ERR_INVALID_SIGNATURE');
+
+    // The challenge key must not have been written. Checking the resource
+    // directly keeps the test insensitive to error-handling refactors that
+    // might swallow the error code but still corrupt state.
+    const { getRedis } = await import('../src/session/store');
+    expect(await getRedis().exists(`cdl:challenge:${s.challenge_id}:used`)).toBe(0);
+
+    // A legit retry with the SAME challenge_id must succeed because the
+    // bad submission did not consume it.
+    const ok = await complete(s.session_id, legit);
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as Record<string, any>).accepted).toBe(true);
   });
 
   it('rejects a second submission and a completed session', async () => {

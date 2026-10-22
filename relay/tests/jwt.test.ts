@@ -43,4 +43,23 @@ describe('jwt and jwks', () => {
 
     await expect(jwtVerify(token, jwks, { audience: 'bank-b.com' })).rejects.toThrow();
   });
+
+  // L1 — jti is a per-token random id. Enables RP-side "have I seen this
+  // exact token before?" dedupe caches even if a buggy relay ever issued
+  // twice for the same session.
+  it('L1: sets a unique jti claim per issuance', async () => {
+    const att = await makeAttestation();
+    const jwks = createLocalJWKSet((await getJwks()) as never);
+    const t1 = await issueAttestationJWT(att, makeSession(), true);
+    const t2 = await issueAttestationJWT(att, makeSession(), true);
+    const p1 = (
+      await jwtVerify(t1, jwks, { issuer: 'http://relay.test:3000', audience: 'example-bank.com' })
+    ).payload;
+    const p2 = (
+      await jwtVerify(t2, jwks, { issuer: 'http://relay.test:3000', audience: 'example-bank.com' })
+    ).payload;
+    expect(typeof p1.jti).toBe('string');
+    expect(p1.jti).toMatch(/^[0-9a-f-]{36}$/);
+    expect(p1.jti).not.toBe(p2.jti);
+  });
 });

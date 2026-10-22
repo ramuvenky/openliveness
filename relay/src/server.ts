@@ -10,6 +10,17 @@ import { registerWebsocketRoutes } from './websocket/handler';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const c = config();
+  // HARDWARE_ATTESTATION=stub makes verifyHardware return attested=true
+  // unconditionally. That's useful in dev / CI, but a deploy that ships
+  // with the stub env var still set would rubber-stamp every attestation
+  // while looking healthy — only a boot warn would surface the mistake.
+  // Refuse to start instead: an operator who really wants the stub in a
+  // production-labelled env has to flip NODE_ENV, which is a louder choice.
+  if (c.nodeEnv === 'production' && c.hardwareMode === 'stub') {
+    throw new Error(
+      'refusing to start: HARDWARE_ATTESTATION=stub is not allowed when NODE_ENV=production',
+    );
+  }
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? 'info' },
     // Only trust the proxy headers when the operator has explicitly promised

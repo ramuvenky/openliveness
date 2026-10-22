@@ -9,6 +9,7 @@ import { LIMITS, limit } from '../middleware/rateLimit';
 import { completeSession } from '../session/complete';
 import { generateChallengeSequence } from '../session/challenge';
 import { loadSession, saveSession, updateSession } from '../session/store';
+import { getCachedToken } from '../session/tokenCache';
 import { CDLSession } from '../session/types';
 import { base64url, safeEqual } from '../utils/crypto';
 
@@ -29,6 +30,7 @@ export async function sessionRoutes(app: FastifyInstance) {
     const challengeId = uuidv4();
     const sequence = generateChallengeSequence();
     const pollToken = base64url(randomBytes(32));
+    const phoneToken = base64url(randomBytes(32));
     const created = new Date();
     const expires = new Date(created.getTime() + c.sessionExpiryMinutes * 60 * 1000);
 
@@ -43,21 +45,27 @@ export async function sessionRoutes(app: FastifyInstance) {
       updated_at: created.toISOString(),
       expires_at: expires.toISOString(),
       poll_token: pollToken,
+      phone_token: phoneToken,
       liveness_decision: null,
       assurance_level: null,
       attestation_hash: null,
-      jwt_issued: null,
+      jwt_hash: null,
+      jwt_issued_at: null,
       webhook_url: body.webhook_url ?? null,
     };
     await saveSession(session);
 
-    // relay_http carries the scheme because the phone SDKs build urls from it directly
+    // relay_http carries the scheme because the phone SDKs build urls from it directly.
+    // phone_token is carried inside the QR (which the phone sees via camera scan) so
+    // it never traverses the browser or the RP server. The phone appends it as
+    // ?token= when opening the device WS; the server rejects any connect without it.
     const qr = {
       session_id: sessionId,
       challenge_id: challengeId,
       challenge_sequence: sequence,
-      relay_ws: `${c.wsBase}/cdl/session/${sessionId}/device`,
+      relay_ws: `${c.wsBase}/cdl/session/${sessionId}/device?token=${phoneToken}`,
       relay_http: c.httpBase,
+      phone_token: phoneToken,
       expires_at: session.expires_at,
       version: '1.0',
     };
@@ -97,8 +105,12 @@ export async function sessionRoutes(app: FastifyInstance) {
         state,
         liveness_decision: session.liveness_decision,
         assurance_level: session.assurance_level,
-        // only hand the token out for a finished, passing session
-        attestation_token: state === 'complete' ? session.jwt_issued : undefined,
+        // The raw token lives in process memory only (see tokenCache); after
+        // its 15-minute TTL expires /status reports the session state but
+        // not the token. A Redis dump cannot recover the token because only
+        // its SHA-256 (jwt_hash) is persisted.
+        attestation_token:
+          state === 'complete' ? getCachedToken(session.session_id) : undefined,
         created_at: session.created_at,
         updated_at: session.updated_at,
         expires_at: session.expires_at,
@@ -110,8 +122,15 @@ export async function sessionRoutes(app: FastifyInstance) {
     '/cdl/session/:id/complete',
     { config: limit(LIMITS.complete) },
     async (req) => {
-      const { token } = await completeSession(req.params.id, req.body, req.log);
-      return { accepted: true, attestation_token: token };
+      const { token, decision } = await completeSession(req.params.id, req.body, req.log);
+      // "accepted" tracks the liveness outcome, not merely that the attestation
+      // was well-formed. A failing decision still issues a token (so the RP has
+      // a signed record of the attempt) but must not be reported as accepted —
+      // RPs that only check `accepted` would otherwise treat a spoof as a pass.
+      const accepted = decision === 'pass';
+      return accepted
+        ? { accepted: true, attestation_token: token }
+        : { accepted: false };
     },
   );
 

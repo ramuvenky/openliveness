@@ -19,10 +19,12 @@ export function makeSession(over: Partial<CDLSession> = {}): CDLSession {
     updated_at: t,
     expires_at: new Date(Date.now() + 300000).toISOString(),
     poll_token: 'poll-token',
+    phone_token: 'phone-token',
     liveness_decision: null,
     assurance_level: null,
     attestation_hash: null,
-    jwt_issued: null,
+    jwt_hash: null,
+    jwt_issued_at: null,
     webhook_url: null,
     ...over,
   };

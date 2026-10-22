@@ -4,6 +4,7 @@ import { CDLSession, SessionState } from './types';
 
 const DAY = 24 * 3600;
 let client: Redis | null = null;
+let rateLimitClient: Redis | null = null;
 
 export function getRedis(): Redis {
   if (!client) {
@@ -19,15 +20,47 @@ export function getRedis(): Redis {
   return client;
 }
 
+// Dedicated connection used only by @fastify/rate-limit. Keeps the limiter's
+// counter traffic off the main client: a Lua script or large pipeline on the
+// session path must not stall limit decisions, and a flood of limit checks
+// must not starve session reads. Both would otherwise contend on the same
+// ioredis command queue (ioredis serializes writes on a single socket).
+export function getRateLimitRedis(): Redis {
+  if (!rateLimitClient) {
+    const c = config();
+    rateLimitClient = new Redis(c.redisUrl, {
+      password: c.redisPassword,
+      maxRetriesPerRequest: 2,
+      enableOfflineQueue: false, // in prod we'd rather fail fast than queue
+    });
+    rateLimitClient.on('error', () => {
+      // handled by @fastify/rate-limit via skipOnError
+    });
+  }
+  return rateLimitClient;
+}
+
 export function setRedis(next: Redis | null) {
   client = next;
+}
+
+export function setRateLimitRedis(next: Redis | null) {
+  rateLimitClient = next;
+}
+
+export function disconnectAllRedis() {
+  client?.disconnect();
+  rateLimitClient?.disconnect();
+  client = null;
+  rateLimitClient = null;
 }
 
 const NULLABLE = [
   'liveness_decision',
   'assurance_level',
   'attestation_hash',
-  'jwt_issued',
+  'jwt_hash',
+  'jwt_issued_at',
   'webhook_url',
 ] as const;
 

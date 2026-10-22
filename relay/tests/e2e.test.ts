@@ -59,8 +59,8 @@ describe.skipIf(!available)('relay end to end', () => {
 
   afterAll(async () => {
     await app?.close();
-    const { getRedis } = await import('../src/session/store');
-    getRedis().disconnect();
+    const { disconnectAllRedis } = await import('../src/session/store');
+    disconnectAllRedis();
   });
 
   async function initiate(assurance = 'any') {
@@ -103,15 +103,101 @@ describe.skipIf(!available)('relay end to end', () => {
       body: JSON.stringify(body),
     });
 
+  function qrFrom(s: Record<string, any>): Record<string, any> {
+    return JSON.parse(Buffer.from(s.qr_payload, 'base64').toString('utf8'));
+  }
+
+  // Rewrites the WS URL from the QR to point at the test server port while
+  // preserving the ?token=... that the server embedded. The e2e tests used
+  // to construct the device URL by hand, which hides the token requirement.
+  function deviceUrl(s: Record<string, any>): string {
+    const relayWs: string = qrFrom(s).relay_ws;
+    return relayWs.replace(/^ws:\/\/[^/]+/, wsBase);
+  }
+
   it('QR payload decodes to the documented shape', async () => {
     const { body } = await initiate();
     expect(body.challenge_sequence).toHaveLength(3);
     expect(new Set(body.challenge_sequence).size).toBe(3);
-    const qr = JSON.parse(Buffer.from(body.qr_payload, 'base64').toString('utf8'));
+    const qr = qrFrom(body);
     expect(Object.keys(qr).sort()).toEqual(
-      ['challenge_id', 'challenge_sequence', 'expires_at', 'relay_http', 'relay_ws', 'session_id', 'version'].sort(),
+      [
+        'challenge_id',
+        'challenge_sequence',
+        'expires_at',
+        'phone_token',
+        'relay_http',
+        'relay_ws',
+        'session_id',
+        'version',
+      ].sort(),
     );
     expect(qr.relay_ws).toContain(`/cdl/session/${body.session_id}/device`);
+    expect(qr.relay_ws).toContain(`token=${qr.phone_token}`);
+    // Server-side invariant: the HTTP response body must NOT carry phone_token
+    // so it never traverses the RP server or logs. The browser gets only the
+    // base64 QR, and only the phone (via camera) sees the token.
+    expect(body.phone_token).toBeUndefined();
+    expect(qr.phone_token).toMatch(/^[A-Za-z0-9_-]{20,}$/);
+  });
+
+  it('rejects a phone WS connect without the capability token', async () => {
+    const { body: s } = await initiate();
+    const url = `${wsBase}/cdl/session/${s.session_id}/device`;
+    const ws = await open(url);
+    const inv = await new Promise<Record<string, any>>((res, rej) => {
+      ws.on('message', (raw) => {
+        try {
+          res(JSON.parse(raw.toString()));
+        } catch (e) {
+          rej(e);
+        }
+      });
+    });
+    expect(inv.type).toBe('session_invalid');
+    expect(inv.reason).toBe('invalid_phone_token');
+    ws.close();
+  });
+
+  it('rejects a phone WS connect with the wrong capability token', async () => {
+    const { body: s } = await initiate();
+    const url = `${wsBase}/cdl/session/${s.session_id}/device?token=not-the-real-one`;
+    const ws = await open(url);
+    const inv = await new Promise<Record<string, any>>((res, rej) => {
+      ws.on('message', (raw) => {
+        try {
+          res(JSON.parse(raw.toString()));
+        } catch (e) {
+          rej(e);
+        }
+      });
+    });
+    expect(inv.type).toBe('session_invalid');
+    expect(inv.reason).toBe('invalid_phone_token');
+    ws.close();
+  });
+
+  it('rejects a phone WS connect that reuses one session_id with another session_id\'s token', async () => {
+    // Session-mix replay: the attacker has the phone_token for session A
+    // and tries to connect to session B. The server must bind the token to
+    // the session_id and reject.
+    const { body: a } = await initiate();
+    const { body: b } = await initiate();
+    const stolenToken = qrFrom(a).phone_token;
+    const url = `${wsBase}/cdl/session/${b.session_id}/device?token=${stolenToken}`;
+    const ws = await open(url);
+    const inv = await new Promise<Record<string, any>>((res, rej) => {
+      ws.on('message', (raw) => {
+        try {
+          res(JSON.parse(raw.toString()));
+        } catch (e) {
+          rej(e);
+        }
+      });
+    });
+    expect(inv.type).toBe('session_invalid');
+    expect(inv.reason).toBe('invalid_phone_token');
+    ws.close();
   });
 
   it('runs the full flow and the browser receives session_complete', async () => {
@@ -120,7 +206,7 @@ describe.skipIf(!available)('relay end to end', () => {
     const connected = nextMessage(browser, 'phone_connected');
     const done = nextMessage(browser, 'session_complete');
 
-    const phone = await open(`${wsBase}/cdl/session/${s.session_id}/device`);
+    const phone = await open(deviceUrl(s));
     const ack = nextMessage(phone, 'session_acknowledged');
     expect((await ack).challenge_id).toBe(s.challenge_id);
     await connected;
@@ -137,13 +223,52 @@ describe.skipIf(!available)('relay end to end', () => {
       headers: { Authorization: `Bearer ${s.poll_token}` },
     });
     expect(((await status.json()) as Record<string, any>).state).toBe('complete');
+
+    // H3: a Redis dump must not contain the raw JWT. Load the session hash
+    // directly and check both that the raw token is absent and that we did
+    // persist its SHA-256 (so operators can still prove which token was
+    // issued, just not replay it).
+    const { getRedis } = await import('../src/session/store');
+    const raw = await getRedis().hgetall(`cdl:session:${s.session_id}`);
+    const token = accepted.attestation_token as string;
+    expect(token.length).toBeGreaterThan(20);
+    for (const [k, v] of Object.entries(raw)) {
+      expect(v, `field ${k} must not leak the raw JWT`).not.toContain(token);
+    }
+    expect(raw.jwt_hash).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(raw.jwt_issued_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // Legacy field must be gone.
+    expect(raw.jwt_issued).toBeUndefined();
+
     browser.close();
     phone.close();
   });
 
+  it('reports accepted=false and withholds the token on a failing liveness decision', async () => {
+    // Signed-but-failed attestations still produce a signed JWT record of the
+    // attempt (the RP may want to log it), but the /complete response must
+    // make the outcome unambiguous: accepted mirrors the liveness decision,
+    // and no attestation_token leaks to a client that only checks accepted.
+    const { body: s } = await initiate();
+    (await open(deviceUrl(s))).close();
+    const res = await complete(s.session_id, await sign(s, { liveness_decision: 'fail' }));
+    expect(res.status).toBe(200);
+    const parsed = (await res.json()) as Record<string, any>;
+    expect(parsed.accepted).toBe(false);
+    expect(parsed.attestation_token).toBeUndefined();
+
+    // /status for a failed session must also not surface the token.
+    const status = await fetch(`${base}/cdl/session/${s.session_id}/status`, {
+      headers: { Authorization: `Bearer ${s.poll_token}` },
+    });
+    const sj = (await status.json()) as Record<string, any>;
+    expect(sj.state).toBe('failed');
+    expect(sj.attestation_token).toBeUndefined();
+  });
+
   it('rejects a tampered attestation', async () => {
     const { body: s } = await initiate();
-    (await open(`${wsBase}/cdl/session/${s.session_id}/device`)).close();
+    (await open(deviceUrl(s))).close();
     const att = await sign(s, { liveness_decision: 'fail' });
     const res = await complete(s.session_id, { ...att, liveness_decision: 'pass' });
     expect(res.status).toBe(400);
@@ -152,7 +277,7 @@ describe.skipIf(!available)('relay end to end', () => {
 
   it('rejects a second submission and a completed session', async () => {
     const { body: s } = await initiate();
-    (await open(`${wsBase}/cdl/session/${s.session_id}/device`)).close();
+    (await open(deviceUrl(s))).close();
     const att = await sign(s);
     expect((await complete(s.session_id, att)).status).toBe(200);
     const again = await complete(s.session_id, att);
@@ -161,7 +286,7 @@ describe.skipIf(!available)('relay end to end', () => {
 
   it('rejects a stale attestation', async () => {
     const { body: s } = await initiate();
-    (await open(`${wsBase}/cdl/session/${s.session_id}/device`)).close();
+    (await open(deviceUrl(s))).close();
     const old = new Date(Date.now() - 200_000).toISOString();
     const res = await complete(s.session_id, await sign(s, { timestamp: old }));
     expect(((await res.json()) as Record<string, any>).error_code).toBe('ERR_TIMESTAMP_STALE');
@@ -183,7 +308,7 @@ describe.skipIf(!available)('relay end to end', () => {
 
   it('refuses a software_only result when IAL2 is required', async () => {
     const { body: s } = await initiate('IAL2');
-    (await open(`${wsBase}/cdl/session/${s.session_id}/device`)).close();
+    (await open(deviceUrl(s))).close();
     const res = await complete(s.session_id, await sign(s));
     expect(((await res.json()) as Record<string, any>).error_code).toBe('ERR_ATTEST_REQUIRED');
   });

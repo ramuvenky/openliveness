@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { safeEqual } from '../utils/crypto';
 import { getRedis, loadSession, updateSession } from '../session/store';
+import { getCachedToken } from '../session/tokenCache';
 import { addBrowser, addPhone, toBrowser } from './hub';
 import { now, PhoneInbound, PhoneMessage } from './messages';
 
@@ -40,17 +41,24 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
       if (session.state === 'phone_connected') {
         ws.send(JSON.stringify({ type: 'phone_connected', timestamp: now() }));
       }
-      if (session.state === 'complete' && session.jwt_issued) {
-        ws.send(
-          JSON.stringify({
-            type: 'session_complete',
-            liveness_decision: session.liveness_decision,
-            assurance_level: session.assurance_level,
-            attestation_token: session.jwt_issued,
-            timestamp: now(),
-          }),
-        );
-        return;
+      if (session.state === 'complete') {
+        // The token is held only in process memory (see tokenCache). Late
+        // joiners after the 15-minute window will see the completion but
+        // not the token — by that point they'd have had to retrieve it
+        // through the live session_complete push or /status earlier.
+        const token = getCachedToken(session.session_id);
+        if (token) {
+          ws.send(
+            JSON.stringify({
+              type: 'session_complete',
+              liveness_decision: session.liveness_decision,
+              assurance_level: session.assurance_level,
+              attestation_token: token,
+              timestamp: now(),
+            }),
+          );
+          return;
+        }
       }
 
       // Tell the browser if nobody scans the code in time.
@@ -66,8 +74,12 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
     },
   );
 
-  // Phone side: no token, the session id from the QR code is the capability.
-  app.get<{ Params: { id: string } }>(
+  // Phone side: capability-token-gated. The token comes from the QR payload
+  // (see /cdl/session/initiate) and must be supplied as ?token= — the session
+  // id alone is not enough, because session ids leak more readily (logs,
+  // Referer headers, screenshots of URLs) than the full QR which only lands
+  // on a camera-facing surface.
+  app.get<{ Params: { id: string }; Querystring: { token?: string } }>(
     '/cdl/session/:id/device',
     { websocket: true },
     async (connection, req) => {
@@ -77,6 +89,11 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
 
       if (!session) {
         reply(ws, { type: 'session_invalid', reason: 'not_found', timestamp: now() });
+        ws.close();
+        return;
+      }
+      if (!req.query.token || !safeEqual(session.phone_token, req.query.token)) {
+        reply(ws, { type: 'session_invalid', reason: 'invalid_phone_token', timestamp: now() });
         ws.close();
         return;
       }

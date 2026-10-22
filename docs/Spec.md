@@ -667,12 +667,20 @@ Response 200:
   "session_id": "uuid",
   "challenge_id": "uuid",
   "challenge_sequence": ["blink", "look_left", "smile"],
-  "relay_ws": "wss://relay.openliveness.dev/cdl/session/{id}/device",
+  "relay_ws": "wss://relay.openliveness.dev/cdl/session/{id}/device?token={phone_token}",
   "relay_http": "relay.openliveness.dev",
+  "phone_token": "base64url, 32 bytes",
   "expires_at": "ISO8601",
   "version": "1.0"
 }
 ```
+
+`phone_token` is a capability token: the phone WS at `/cdl/session/{id}/device`
+requires it as `?token=`. It is deliberately **only** inside the QR payload so
+it reaches the phone through the camera channel and never traverses the browser
+or the relying-party backend. Possession of `session_id` alone (which may leak
+through logs, URL referers, or screenshots of the browser URL) is not enough to
+impersonate the phone leg.
 
 **QR encoding**: `qr_payload` is `base64(JSON.stringify(qr_object))`.
 The QR image encodes that base64 string as its text content.
@@ -756,10 +764,17 @@ Response: { "device_token": "opaque string" }
 
 Response: `{ "nonce": "base64url string" }`
 
+The phone requests this nonce *before* liveness runs (so it can present the
+Play Integrity token alongside the final attestation), so `liveness_decision`
+is deliberately **not** part of the nonce. The decision is still cryptographically
+bound to the session: the signed attestation body — which the Play Integrity
+nonce accompanies — carries `liveness_decision`, and the server rejects the
+submission if that signed value is tampered with.
+
 ```typescript
 import { sha256base64url } from '../utils/crypto';
 const nonce = sha256base64url(
-  sessionId + challengeId + livenessDecision + process.env.INTEGRITY_NONCE_SECRET!
+  sessionId + challengeId + process.env.INTEGRITY_NONCE_SECRET!
 );
 ```
 
@@ -1697,7 +1712,14 @@ interface CDLSession {
   liveness_decision: string | null;
   assurance_level: string | null;
   attestation_hash: string | null;
-  jwt_issued: string | null;
+  // SHA-256 of the issued attestation JWT (base64url). The raw token is
+  // intentionally NOT persisted in Redis — it lives only in process memory
+  // for the 15-minute handoff window (see `tokenCache`). If the relay runs
+  // multiple instances, route a given session_id's /status and WS traffic
+  // sticky to a single instance, or rely on the WS `session_complete` push
+  // for token delivery.
+  jwt_hash: string | null;
+  jwt_issued_at: string | null;  // ISO8601, when the token was signed
   webhook_url: string | null;
 }
 ```

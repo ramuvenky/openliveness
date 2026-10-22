@@ -19,10 +19,18 @@ export interface CDLSession {
   updated_at: string;
   expires_at: string;
   poll_token: string;
+  // Capability token embedded in the QR payload. The phone WS at
+  // /cdl/session/:id/device requires it as ?token=, so possession of the
+  // session_id alone (which may leak via logs, URL referers, over-the-
+  // shoulder etc.) is not enough to impersonate the phone leg.
+  phone_token: string;
   liveness_decision: string | null;
   assurance_level: string | null;
   attestation_hash: string | null;
-  jwt_issued: string | null;
+  // SHA-256 of the issued JWT (base64url). We deliberately do NOT persist
+  // the raw token in Redis; see src/session/tokenCache.ts for the handoff.
+  jwt_hash: string | null;
+  jwt_issued_at: string | null;
   webhook_url: string | null;
 }
 

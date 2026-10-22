@@ -11,9 +11,10 @@ import {
 } from '../attestation/verify';
 import { now } from '../websocket/messages';
 import { toBrowser, toPhone } from '../websocket/hub';
-import { canonicalize, sha256hex } from '../utils/crypto';
+import { canonicalize, sha256base64url, sha256hex } from '../utils/crypto';
 import { claimChallenge, isChallengeUsed } from './challenge';
 import { loadSession, updateSession } from './store';
+import { cacheToken } from './tokenCache';
 import { attestationSchema, CDLAttestation } from './types';
 import { callWebhook } from './webhook';
 
@@ -73,6 +74,11 @@ export async function completeSession(
 
     // 11. token
     const token = await issueAttestationJWT(att, session, hardwareAttested);
+    // The raw token is deliberately NOT persisted in Redis: a snapshot leak
+    // would otherwise exfiltrate every live attestation JWT. Instead we
+    // persist only its hash (for audit / later verification) and park the
+    // raw string in-process for /status + late-join WS handoff.
+    cacheToken(sessionId, token);
 
     // 12. state
     const passed = att.liveness_decision === 'pass';
@@ -81,7 +87,8 @@ export async function completeSession(
       liveness_decision: att.liveness_decision,
       assurance_level: att.assurance_level,
       attestation_hash: sha256hex(canonicalize(att)),
-      jwt_issued: token,
+      jwt_hash: sha256base64url(token),
+      jwt_issued_at: new Date().toISOString(),
     });
 
     // 13. tell the browser and the phone

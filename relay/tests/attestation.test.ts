@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import { describe, expect, it } from 'vitest';
 import {
   checkAssurance,
@@ -14,6 +16,32 @@ describe('canonicalize', () => {
     expect(canonicalize({ b: 1, a: { d: [2, { z: 1, y: 2 }], c: 'x' } })).toBe(
       '{"a":{"c":"x","d":[2,{"y":2,"z":1}]},"b":1}',
     );
+  });
+
+  // The shared protocol fixtures are the cross-stack contract: if the server
+  // diverges, mobile signatures stop verifying for every real attestation.
+  // Load them from protocol/canonical-json-vectors.json so a drift here fails
+  // in CI rather than at the next phone handshake.
+  const vectorsPath = resolve(__dirname, '../../protocol/canonical-json-vectors.json');
+  const vectors = JSON.parse(readFileSync(vectorsPath, 'utf8')) as {
+    name: string;
+    input: unknown;
+    expected: string;
+  }[];
+  for (const v of vectors) {
+    it(`vector: ${v.name}`, () => {
+      expect(canonicalize(v.input)).toBe(v.expected);
+    });
+  }
+
+  it('rejects NaN', () => {
+    expect(() => canonicalize({ n: Number.NaN })).toThrow(/non-finite/);
+  });
+  it('rejects +Infinity', () => {
+    expect(() => canonicalize({ n: Number.POSITIVE_INFINITY })).toThrow(/non-finite/);
+  });
+  it('rejects -Infinity', () => {
+    expect(() => canonicalize({ n: Number.NEGATIVE_INFINITY })).toThrow(/non-finite/);
   });
 });
 

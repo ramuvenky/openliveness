@@ -11,9 +11,10 @@ import {
 } from '../attestation/verify';
 import { now } from '../websocket/messages';
 import { toBrowser, toPhone } from '../websocket/hub';
-import { canonicalize, sha256hex } from '../utils/crypto';
+import { canonicalize, sha256base64url, sha256hex } from '../utils/crypto';
 import { claimChallenge, isChallengeUsed } from './challenge';
 import { loadSession, updateSession } from './store';
+import { cacheToken } from './tokenCache';
 import { attestationSchema, CDLAttestation } from './types';
 import { callWebhook } from './webhook';
 
@@ -59,20 +60,33 @@ export async function completeSession(
     // 6. freshness
     checkTimestamp(att.timestamp, config().attestationMaxAgeSeconds);
 
-    // 7. signature
+    // 7. signature — verified BEFORE burning the challenge so a legit device
+    // whose submission happens to fail signature verification (encoding bug,
+    // transient key rotation) is not punished by losing its challenge. ECDSA
+    // verify is a sub-millisecond operation; the expensive hardware proof
+    // still happens after the SETNX, so a flood of duplicate replays can't
+    // consume the full attestation pipeline.
     if (!(await verifyAttestationSignature(att))) throw new CDLError('ERR_INVALID_SIGNATURE');
 
-    // 8. hardware proof
-    const hardwareAttested = await verifyHardware(att);
-
-    // 9. assurance
-    checkAssurance(att, session, hardwareAttested);
-
-    // 10. burn the challenge, atomically
+    // 7a. Burn the challenge atomically. SETNX makes two racing submissions
+    // for the same challenge_id resolve to exactly one winner, and the
+    // signature check above ensures only submissions that could plausibly
+    // be from the real device get a chance to burn it.
     if (!(await claimChallenge(att.challenge_id))) throw new CDLError('ERR_CHALLENGE_REUSED');
 
+    // 8. hardware proof
+    const hardware = await verifyHardware(att, session);
+
+    // 9. assurance
+    checkAssurance(att, session, hardware.attested);
+
     // 11. token
-    const token = await issueAttestationJWT(att, session, hardwareAttested);
+    const token = await issueAttestationJWT(att, session, hardware.attested);
+    // The raw token is deliberately NOT persisted in Redis: a snapshot leak
+    // would otherwise exfiltrate every live attestation JWT. Instead we
+    // persist only its hash (for audit / later verification) and park the
+    // raw string in-process for /status + late-join WS handoff.
+    cacheToken(sessionId, token);
 
     // 12. state
     const passed = att.liveness_decision === 'pass';
@@ -81,7 +95,8 @@ export async function completeSession(
       liveness_decision: att.liveness_decision,
       assurance_level: att.assurance_level,
       attestation_hash: sha256hex(canonicalize(att)),
-      jwt_issued: token,
+      jwt_hash: sha256base64url(token),
+      jwt_issued_at: new Date().toISOString(),
     });
 
     // 13. tell the browser and the phone
@@ -105,7 +120,7 @@ export async function completeSession(
     toPhone(sessionId, { type: 'attestation_received', timestamp: now() });
 
     // 14. webhook, not awaited so a slow receiver cannot hold the phone up
-    void callWebhook({ ...session, assurance_level: att.assurance_level }, token, att, hardwareAttested, log);
+    void callWebhook({ ...session, assurance_level: att.assurance_level }, token, att, hardware.attested, log);
 
     return { token, decision: att.liveness_decision };
   } catch (e) {

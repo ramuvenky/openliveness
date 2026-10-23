@@ -13,12 +13,24 @@ export interface VerifyOptions {
   requiredDecision?: 'pass' | 'fail' | 'inconclusive';
   /** Defaults to the hostname of relayUrl. */
   issuer?: string;
-  /** Reject tokens older than this many seconds, on top of the normal expiry. */
-  maxAgeSeconds?: number;
+  /**
+   * Reject tokens older than this many seconds, on top of the normal expiry.
+   * Defaults to {@link DEFAULT_MAX_AGE_SECONDS}; pass `null` to disable the
+   * age check entirely (not recommended — the relay's exp of 15 min is the
+   * only remaining upper bound).
+   */
+  maxAgeSeconds?: number | null;
   clockToleranceSeconds?: number;
   /** Supply the key set directly instead of fetching it. Handy for tests and offline use. */
   jwks?: JSONWebKeySet;
 }
+
+// Short enough that a bank's "liveness check should be recent" guarantee is
+// meaningful, long enough that a slow onboarding form (user filling fields
+// after the liveness scan) doesn't invalidate the token. Callers can override
+// per use case: 60s for high-value transactions, 15m to allow out-of-session
+// token forwarding.
+export const DEFAULT_MAX_AGE_SECONDS = 300;
 
 export interface VerifyResult {
   valid: boolean;
@@ -70,7 +82,11 @@ export async function verifyAttestationJWT(
     layerScores: c.cdl_layer_scores,
   };
 
-  if (!isFresh(payload.iat, options.maxAgeSeconds)) {
+  const maxAge =
+    options.maxAgeSeconds === null
+      ? undefined
+      : options.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS;
+  if (!isFresh(payload.iat, maxAge)) {
     return { ...base, reason: 'token is older than maxAgeSeconds' };
   }
   const wantedDecision = options.requiredDecision ?? 'pass';

@@ -1,11 +1,139 @@
 import * as cbor from 'cbor';
-import { createHash, createVerify, X509Certificate, createPublicKey } from 'crypto';
+import { createHash, createVerify, X509Certificate, createPublicKey, timingSafeEqual } from 'crypto';
 import { readFileSync } from 'fs';
 import { config } from '../config';
 import { CDLError } from '../errors';
 import { getRedis } from '../session/store';
 
 const YEAR = 365 * 24 * 3600;
+
+// Atomic compare-and-set on the App Attest signCount. ioredis `eval` runs the
+// script server-side so no two concurrent assertions can both read "100" and
+// both write "101". The script tolerates a corrupted (non-numeric) stored
+// value by treating it as 0 — matches the Number.isFinite guard in the TS
+// callers so a Redis-level glitch cannot silently open a replay window.
+export const COUNTER_CAS_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+local cur = 0
+if raw then
+  local n = tonumber(raw)
+  if n then cur = n end
+end
+local new = tonumber(ARGV[1])
+if new == nil then return 0 end
+if new > cur then
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+  return 1
+else
+  return 0
+end
+`;
+
+// Apple App Attest certificate extension (1.2.840.113635.100.8.2) DER body:
+// first subid is 1.2 → 0x2a; the rest base-128.
+const APPLE_ATTEST_EXT_OID = Buffer.from([
+  0x2a, 0x86, 0x48, 0x86, 0xf7, 0x63, 0x64, 0x08, 0x02,
+]);
+
+type Tlv = { tag: number; headerLen: number; valueLen: number; valueOffset: number };
+
+// Minimal DER TLV reader. Supports short form and multi-byte long form up to
+// 4-byte lengths (ample for an X.509 cert). We deliberately avoid a general
+// ASN.1 library to keep the trusted parse surface tiny and auditable.
+function readTlv(buf: Buffer, offset: number): Tlv {
+  if (offset + 2 > buf.length) throw new Error('TLV: truncated header');
+  const tag = buf[offset];
+  const lenByte = buf[offset + 1];
+  if (lenByte < 0x80) {
+    const end = offset + 2 + lenByte;
+    if (end > buf.length) throw new Error('TLV: truncated value');
+    return { tag, headerLen: 2, valueLen: lenByte, valueOffset: offset + 2 };
+  }
+  const n = lenByte & 0x7f;
+  if (n === 0 || n > 4) throw new Error('TLV: unsupported length form');
+  if (offset + 2 + n > buf.length) throw new Error('TLV: truncated long length');
+  let valueLen = 0;
+  for (let i = 0; i < n; i++) {
+    valueLen = (valueLen << 8) | buf[offset + 2 + i];
+  }
+  const end = offset + 2 + n + valueLen;
+  if (end > buf.length) throw new Error('TLV: truncated value');
+  return { tag, headerLen: 2 + n, valueLen, valueOffset: offset + 2 + n };
+}
+
+// Walks the DER-encoded X.509 cert to locate the Apple App Attest extension
+// (OID 1.2.840.113635.100.8.2) and returns the SHA-256 nonce bytes carried
+// inside its `[1] EXPLICIT OCTET STRING` payload. Returns null if the
+// extension is absent or malformed. Exported for direct unit testing — the
+// nonce comparison itself happens in verifyAppAttestAttestation under
+// timingSafeEqual.
+export function extractAppleAttestNonce(certDer: Buffer): Buffer | null {
+  try {
+    // Certificate ::= SEQUENCE { tbsCertificate, sigAlg, sigValue }
+    const outer = readTlv(certDer, 0);
+    if (outer.tag !== 0x30) return null;
+    const tbs = readTlv(certDer, outer.valueOffset);
+    if (tbs.tag !== 0x30) return null;
+    const tbsEnd = tbs.valueOffset + tbs.valueLen;
+
+    // Find [3] EXPLICIT extensions in TBSCertificate.
+    let p = tbs.valueOffset;
+    let extensionsSeq: Tlv | null = null;
+    while (p < tbsEnd) {
+      const t = readTlv(certDer, p);
+      if (t.tag === 0xa3) {
+        const inner = readTlv(certDer, t.valueOffset);
+        if (inner.tag === 0x30) extensionsSeq = inner;
+        break;
+      }
+      p = t.valueOffset + t.valueLen;
+    }
+    if (!extensionsSeq) return null;
+
+    // Walk each Extension SEQUENCE { OID, [BOOLEAN critical], OCTET STRING }.
+    const extEnd = extensionsSeq.valueOffset + extensionsSeq.valueLen;
+    let q = extensionsSeq.valueOffset;
+    while (q < extEnd) {
+      const ext = readTlv(certDer, q);
+      if (ext.tag !== 0x30) return null;
+      const oidTlv = readTlv(certDer, ext.valueOffset);
+      if (oidTlv.tag !== 0x06) {
+        q = ext.valueOffset + ext.valueLen;
+        continue;
+      }
+      const oid = certDer.subarray(oidTlv.valueOffset, oidTlv.valueOffset + oidTlv.valueLen);
+      if (!oid.equals(APPLE_ATTEST_EXT_OID)) {
+        q = ext.valueOffset + ext.valueLen;
+        continue;
+      }
+      // Skip optional BOOLEAN critical, then read extnValue OCTET STRING.
+      let r = oidTlv.valueOffset + oidTlv.valueLen;
+      const maybeCritical = readTlv(certDer, r);
+      if (maybeCritical.tag === 0x01) r = maybeCritical.valueOffset + maybeCritical.valueLen;
+      const extnValue = readTlv(certDer, r);
+      if (extnValue.tag !== 0x04) return null;
+      // Inside extnValue: SEQUENCE { [1] EXPLICIT OCTET STRING }
+      const seq = readTlv(certDer, extnValue.valueOffset);
+      if (seq.tag !== 0x30) return null;
+      const seqEnd = seq.valueOffset + seq.valueLen;
+      let s = seq.valueOffset;
+      while (s < seqEnd) {
+        const tagged = readTlv(certDer, s);
+        if (tagged.tag === 0xa1) {
+          const octet = readTlv(certDer, tagged.valueOffset);
+          if (octet.tag === 0x04) {
+            return certDer.subarray(octet.valueOffset, octet.valueOffset + octet.valueLen);
+          }
+        }
+        s = tagged.valueOffset + tagged.valueLen;
+      }
+      return null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 // App Attest key ids are the SHA-256 of the uncompressed public key point.
 // Phones may send the DER SPKI, so we hash the raw point (last 65 bytes of a P-256 SPKI).
@@ -82,9 +210,13 @@ export async function verifyAppAttestAttestation(
   const nonce = createHash('sha256').update(Buffer.concat([authData, clientDataHash])).digest();
 
   const leaf = new X509Certificate(x5c[0]);
-  // The nonce lives in a certificate extension, finding it in the raw bytes is enough here.
-  if (!leaf.raw.includes(nonce)) {
-    throw new CDLError('ERR_APPLE_ATTEST_INVALID', 'nonce not found in certificate');
+  // The nonce lives in Apple's `1.2.840.113635.100.8.2` extension, inside a
+  // SEQUENCE { [1] EXPLICIT OCTET STRING }. A raw-bytes includes() check
+  // would match if the nonce bytes happened to appear anywhere else in the
+  // cert, so parse the extension explicitly and compare in constant time.
+  const certNonce = extractAppleAttestNonce(leaf.raw);
+  if (!certNonce || certNonce.length !== nonce.length || !timingSafeEqual(certNonce, nonce)) {
+    throw new CDLError('ERR_APPLE_ATTEST_INVALID', 'nonce mismatch in certificate extension');
   }
 
   const point = createPublicKey(leaf.publicKey.export({ type: 'spki', format: 'pem' }))
@@ -111,9 +243,7 @@ export async function verifyAppAttestAssertion(
   const signature: Buffer = decoded.signature;
   if (!authData || !signature) throw new CDLError('ERR_APPLE_ATTEST_INVALID', 'malformed assertion');
 
-  const stored = parseInt((await r.get(`cdl:device:${keyId}:counter`)) || '0', 10);
   const counter = authData.readUInt32BE(33);
-  if (counter <= stored) throw new CDLError('ERR_APPLE_ATTEST_COUNTER');
 
   const clientData = sessionId + challengeId + livenessDecision;
   const clientDataHash = createHash('sha256').update(clientData).digest();
@@ -123,8 +253,19 @@ export async function verifyAppAttestAssertion(
   const pem = await getStoredPublicKey(keyId);
   const v = createVerify('SHA256');
   v.update(nonce);
+  // Verify the signature BEFORE touching the counter. The counter is persisted
+  // atomically via the Lua CAS below; running the CAS on an unverified
+  // submission would let an attacker poison the stored counter by sending
+  // garbage with an inflated signCount, locking the real device out.
   if (!v.verify(pem, signature)) throw new CDLError('ERR_APPLE_ATTEST_INVALID');
 
-  await r.set(`cdl:device:${keyId}:counter`, String(counter), 'EX', YEAR);
+  const ok = (await r.eval(
+    COUNTER_CAS_SCRIPT,
+    1,
+    `cdl:device:${keyId}:counter`,
+    String(counter),
+    String(YEAR),
+  )) as number;
+  if (ok !== 1) throw new CDLError('ERR_APPLE_ATTEST_COUNTER');
   return true;
 }

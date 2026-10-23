@@ -19,16 +19,31 @@ export interface CDLSession {
   updated_at: string;
   expires_at: string;
   poll_token: string;
+  // Capability token embedded in the QR payload. The phone WS at
+  // /cdl/session/:id/device requires it as ?token=, so possession of the
+  // session_id alone (which may leak via logs, URL referers, over-the-
+  // shoulder etc.) is not enough to impersonate the phone leg.
+  phone_token: string;
   liveness_decision: string | null;
   assurance_level: string | null;
   attestation_hash: string | null;
-  jwt_issued: string | null;
+  // SHA-256 of the issued JWT (base64url). We deliberately do NOT persist
+  // the raw token in Redis; see src/session/tokenCache.ts for the handoff.
+  jwt_hash: string | null;
+  jwt_issued_at: string | null;
   webhook_url: string | null;
 }
 
 export const CHALLENGE_STEPS = ['blink', 'look_left', 'look_right', 'smile', 'nod'] as const;
 
-const score = z.number().min(0).max(1);
+// Scores feed the canonical-JSON preimage used to verify the device signature,
+// and canonicalize() throws on NaN / ±Infinity (its contract with the mobile
+// SDKs is "finite only"). We reject non-finite numbers up-front at the schema
+// boundary so a malformed body never reaches canonicalize — the implicit
+// NaN-fails-comparisons behavior of .min / .max would still catch it, but
+// relying on that is brittle: a future refactor dropping the range check
+// would silently open the door. `.finite()` is the explicit contract.
+const score = z.number().finite().min(0).max(1);
 
 export const attestationSchema = z
   .object({
@@ -61,7 +76,13 @@ export const attestationSchema = z
         motion_detected: z.boolean(),
         front_camera_confirmed: z.boolean(),
       })
-      .strict(),
+      // Passthrough (not .strict()) so a newer mobile SDK that adds signal
+      // fields (ambient_temperature, glare_detected, …) can roll out without
+      // the server rejecting the whole attestation. layer_scores stays strict
+      // because unknown score keys would change the canonicalize preimage and
+      // break signature verification; ambient_conditions is read for logging
+      // and advisory JWT claims only, so new keys are safe to ignore here.
+      .passthrough(),
     public_key: z.string().min(1),
     signature: z.string().min(1),
   })

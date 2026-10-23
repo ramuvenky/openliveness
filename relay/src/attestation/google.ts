@@ -44,7 +44,14 @@ export async function verifyPlayIntegrity(
   }
   if (!verdict) throw new CDLError('ERR_GOOGLE_INTEGRITY_INVALID');
 
-  const expected = await getRedis().get(`cdl:session:${sessionId}:integrity_nonce`);
+  // The nonce is single-use: fetch-and-delete in one MULTI so a captured
+  // Play Integrity token can't be replayed within the 5-minute nonce TTL.
+  // (GETDEL would be one round-trip but the MULTI form works on any Redis
+  // version and against the FakeRedis used by the tests.)
+  const nonceKey = `cdl:session:${sessionId}:integrity_nonce`;
+  const r = getRedis();
+  const results = await r.multi().get(nonceKey).del(nonceKey).exec();
+  const expected = (results?.[0]?.[1] ?? null) as string | null;
   if (!expected || verdict.requestDetails?.nonce !== expected) {
     throw new CDLError('ERR_GOOGLE_INTEGRITY_NONCE');
   }
@@ -54,10 +61,19 @@ export async function verifyPlayIntegrity(
     throw new CDLError('ERR_GOOGLE_INTEGRITY_LOW');
   }
 
+  // A valid device verdict for a non-PLAY_RECOGNIZED app means the user is
+  // running a sideloaded or cloned build of the SDK. The device-level proof
+  // only tells us "this hardware is unmodified", not "this is our app" — so
+  // the relay refuses here rather than letting the clone pass as IAL2.
+  const appRecognized = verdict.appIntegrity?.appRecognitionVerdict === 'PLAY_RECOGNIZED';
+  if (!appRecognized) {
+    throw new CDLError('ERR_GOOGLE_INTEGRITY_INVALID', 'app not recognized by Play');
+  }
+
   return {
     valid: true,
     meetsDevice: true,
     meetsStrong: verdicts.includes('MEETS_STRONG_INTEGRITY'),
-    appRecognized: verdict.appIntegrity?.appRecognitionVerdict === 'PLAY_RECOGNIZED',
+    appRecognized: true,
   };
 }

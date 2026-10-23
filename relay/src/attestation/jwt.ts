@@ -1,5 +1,5 @@
 import { readFileSync } from 'fs';
-import { createPublicKey } from 'crypto';
+import { createPublicKey, randomUUID } from 'crypto';
 import { SignJWT, importPKCS8, exportJWK, importSPKI, KeyLike } from 'jose';
 import { config } from '../config';
 import { CDLAttestation, CDLSession } from '../session/types';
@@ -27,7 +27,11 @@ export async function issueAttestationJWT(
 ): Promise<string> {
   const s = attestation.layer_scores;
   return new SignJWT({
-    cdl_version: '1.0',
+    // Mirror the mobile SDK's declared attestation.version instead of a
+    // hard-coded '1.0'. If an older SDK keeps sending v1.0 after we've
+    // bumped the schema, the RP needs to see v1.0 in the JWT so its
+    // compatibility checks match reality rather than this handler's build.
+    cdl_version: attestation.version,
     cdl_decision: attestation.liveness_decision,
     cdl_assurance: attestation.assurance_level,
     cdl_device_platform: attestation.device_platform,
@@ -50,23 +54,42 @@ export async function issueAttestationJWT(
     .setIssuer(config().issuer)
     .setAudience(session.relying_party)
     .setSubject(session.session_id)
+    // jti is a random per-token UUID. sub already uniquely identifies a
+    // session, so an RP can dedupe on either, but jti gives downstream
+    // "have I seen this exact token before?" caches a canonical key even
+    // if a buggy relay ever issued twice for the same session.
+    .setJti(randomUUID())
     .setExpirationTime('15m')
     .sign(await getPrivateKey());
 }
 
+// N-c: cache the parsed JWKS but auto-refresh after JWKS_CACHE_TTL_MS so
+// an on-disk key rotation lands within the TTL without a server restart.
+// 5 minutes matches the Cache-Control: max-age we advertise to clients at
+// /cdl/.well-known/jwks.json — a client's cached copy is no fresher than
+// ours, so there's no benefit to a tighter server-side window.
+export const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 let jwksCache: { keys: unknown[] } | null = null;
+let jwksCachedAt = 0;
 
-export async function getJwks() {
-  if (!jwksCache) {
+// Exported for tests so they can advance "now" without relying on real time.
+export function _now(): number {
+  return Date.now();
+}
+
+export async function getJwks(now: number = _now()) {
+  if (!jwksCache || now - jwksCachedAt > JWKS_CACHE_TTL_MS) {
     const pem = readFileSync(config().jwtPublicKeyPath, 'utf8');
     // round trip through KeyObject so a private key file is never exposed by mistake
     const spki = createPublicKey(pem).export({ type: 'spki', format: 'pem' }).toString();
     const jwk = await exportJWK(await importSPKI(spki, 'ES256'));
     jwksCache = { keys: [{ ...jwk, kid: KEY_ID, alg: 'ES256', use: 'sig' }] };
+    jwksCachedAt = now;
   }
   return jwksCache;
 }
 
 export function resetJwksCache() {
   jwksCache = null;
+  jwksCachedAt = 0;
 }

@@ -1,4 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// deliverPinned is the Node-level HTTP boundary. Mocking it in-place keeps
+// the tests focused on policy (scheme/SSRF/signing/pinning) and avoids
+// stubbing node:http. Each test can override the return value via
+// mockDeliverPinned.mockResolvedValueOnce(...) as needed.
+// vi.mock() is hoisted to the top of the module, so the factory can't
+// reference a top-level const. vi.hoisted() is the escape hatch: the
+// variable is initialized in the hoisted scope and visible both to the
+// factory and to the rest of the test file.
+const { mockDeliverPinned } = vi.hoisted(() => ({
+  mockDeliverPinned: vi.fn().mockResolvedValue({ ok: true, status: 200 }),
+}));
+vi.mock('../src/session/webhookDelivery', () => ({ deliverPinned: mockDeliverPinned }));
+
 import {
   callWebhook,
   isBlockedIp,
@@ -22,7 +36,8 @@ afterEach(() => {
   process.env.NODE_ENV = originalEnv;
   delete process.env.WEBHOOK_SIGNING_SECRET;
   delete process.env.ALLOW_LOOPBACK_WEBHOOKS;
-  vi.restoreAllMocks();
+  mockDeliverPinned.mockClear();
+  mockDeliverPinned.mockResolvedValue({ ok: true, status: 200 });
 });
 
 describe('normalizeWebhookUrl — scheme policy', () => {
@@ -138,7 +153,6 @@ describe('M3 — ALLOW_LOOPBACK_WEBHOOKS gating in callWebhook', () => {
   it('rejects loopback webhook when ALLOW_LOOPBACK_WEBHOOKS is unset', async () => {
     delete process.env.ALLOW_LOOPBACK_WEBHOOKS;
     process.env.WEBHOOK_SIGNING_SECRET = 'sek';
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
     const warn = vi.fn();
     const l = { ...log, warn };
     await callWebhook(
@@ -148,7 +162,7 @@ describe('M3 — ALLOW_LOOPBACK_WEBHOOKS gating in callWebhook', () => {
       false,
       l,
     );
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDeliverPinned).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(
       expect.anything(),
       expect.stringMatching(/scheme not allowed/),
@@ -162,7 +176,6 @@ describe('M3 — ALLOW_LOOPBACK_WEBHOOKS gating in callWebhook', () => {
     process.env.NODE_ENV = 'development';
     delete process.env.ALLOW_LOOPBACK_WEBHOOKS;
     process.env.WEBHOOK_SIGNING_SECRET = 'sek';
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
     await callWebhook(
       makeSession({ webhook_url: 'http://127.0.0.1:9000/x' }),
       'tok',
@@ -170,13 +183,12 @@ describe('M3 — ALLOW_LOOPBACK_WEBHOOKS gating in callWebhook', () => {
       false,
       log,
     );
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDeliverPinned).not.toHaveBeenCalled();
   });
 
   it('accepts loopback webhook only when ALLOW_LOOPBACK_WEBHOOKS=true', async () => {
     process.env.ALLOW_LOOPBACK_WEBHOOKS = 'true';
     process.env.WEBHOOK_SIGNING_SECRET = 'sek';
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
     await callWebhook(
       makeSession({ webhook_url: 'http://127.0.0.1:9000/x' }),
       'tok',
@@ -184,7 +196,7 @@ describe('M3 — ALLOW_LOOPBACK_WEBHOOKS gating in callWebhook', () => {
       false,
       log,
     );
-    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(mockDeliverPinned).toHaveBeenCalledOnce();
   });
 });
 
@@ -257,8 +269,12 @@ describe('resolveAndCheckHost', () => {
     await expect(resolveAndCheckHost('169.254.169.254', false)).rejects.toThrow(/blocked ip/);
   });
 
-  it('passes a public IP literal', async () => {
-    await expect(resolveAndCheckHost('8.8.8.8', false)).resolves.toBeUndefined();
+  it('returns the vetted (address, family) for a public IP literal', async () => {
+    // H-a: the function used to just gate; it now hands back the pinned
+    // address so deliverPinned can bypass fetch's DNS lookup. family must be
+    // the Node net.isIP() style (4 or 6) so http.request accepts it.
+    const r = await resolveAndCheckHost('8.8.8.8', false);
+    expect(r).toEqual({ address: '8.8.8.8', family: 4 });
   });
 
   it('rejects localhost when loopback is not allowed', async () => {
@@ -266,8 +282,10 @@ describe('resolveAndCheckHost', () => {
     await expect(resolveAndCheckHost('localhost', false)).rejects.toThrow(/blocked ip/);
   });
 
-  it('passes localhost when loopback is allowed', async () => {
-    await expect(resolveAndCheckHost('localhost', true)).resolves.toBeUndefined();
+  it('returns a loopback (address, family) when loopback is allowed', async () => {
+    const r = await resolveAndCheckHost('localhost', true);
+    expect(r.address).toMatch(/^(127\.0\.0\.1|::1)$/);
+    expect([4, 6]).toContain(r.family);
   });
 });
 
@@ -333,14 +351,12 @@ describe('callWebhook integration', () => {
   });
 
   it('skips when webhook_url is null', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
     await callWebhook(makeSession({ webhook_url: null }), 'tok', att, false, log);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDeliverPinned).not.toHaveBeenCalled();
   });
 
   it('skips and warns on non-https URL in production', async () => {
     process.env.NODE_ENV = 'production';
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
     await callWebhook(
       makeSession({ webhook_url: 'http://example.com/hook' }),
       'tok',
@@ -348,7 +364,7 @@ describe('callWebhook integration', () => {
       false,
       log,
     );
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDeliverPinned).not.toHaveBeenCalled();
     expect(log.warn).toHaveBeenCalledWith(
       expect.anything(),
       expect.stringMatching(/scheme not allowed/),
@@ -358,7 +374,6 @@ describe('callWebhook integration', () => {
   it('skips and warns when host is a cloud metadata IP', async () => {
     process.env.NODE_ENV = 'production';
     process.env.WEBHOOK_SIGNING_SECRET = 'sek';
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
     await callWebhook(
       makeSession({ webhook_url: 'https://169.254.169.254/latest/meta-data/' }),
       'tok',
@@ -366,7 +381,7 @@ describe('callWebhook integration', () => {
       false,
       log,
     );
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDeliverPinned).not.toHaveBeenCalled();
     expect(log.warn).toHaveBeenCalledWith(
       expect.anything(),
       expect.stringMatching(/SSRF guard/),
@@ -376,7 +391,6 @@ describe('callWebhook integration', () => {
   it('skips and warns when signing secret is not set', async () => {
     process.env.NODE_ENV = 'production';
     delete process.env.WEBHOOK_SIGNING_SECRET;
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
     await callWebhook(
       makeSession({ webhook_url: 'https://8.8.8.8/hook' }),
       'tok',
@@ -384,7 +398,7 @@ describe('callWebhook integration', () => {
       false,
       log,
     );
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockDeliverPinned).not.toHaveBeenCalled();
     expect(log.warn).toHaveBeenCalledWith(
       expect.anything(),
       expect.stringMatching(/WEBHOOK_SIGNING_SECRET not configured/),
@@ -394,7 +408,6 @@ describe('callWebhook integration', () => {
   it('posts with signature header on happy path', async () => {
     process.env.NODE_ENV = 'production';
     process.env.WEBHOOK_SIGNING_SECRET = 'sek';
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(new Response(''));
     await callWebhook(
       makeSession({ webhook_url: 'https://8.8.8.8/hook' }),
       'tok-123',
@@ -402,20 +415,90 @@ describe('callWebhook integration', () => {
       true,
       log,
     );
-    expect(fetchSpy).toHaveBeenCalledOnce();
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(mockDeliverPinned).toHaveBeenCalledOnce();
+    const [url, opts] = mockDeliverPinned.mock.calls[0] as [
+      string,
+      {
+        headers: Record<string, string>;
+        body: string;
+        timeoutMs: number;
+        address: string;
+        family: 4 | 6;
+      },
+    ];
     expect(url).toBe('https://8.8.8.8/hook');
-    const headers = init.headers as Record<string, string>;
-    expect(headers['Content-Type']).toBe('application/json');
-    expect(headers['X-OpenLiveness-Signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
-    const body = init.body as string;
-    expect(JSON.parse(body)).toMatchObject({
+    expect(opts.headers['Content-Type']).toBe('application/json');
+    expect(opts.headers['X-OpenLiveness-Signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(JSON.parse(opts.body)).toMatchObject({
       event: 'cdl.session.complete',
       attestation_token: 'tok-123',
       hardware_attested: true,
     });
     // Signature must be computable from exactly the body we send.
-    const expected = signWebhookBody('sek', body);
-    expect(headers['X-OpenLiveness-Signature']).toBe(expected);
+    const expected = signWebhookBody('sek', opts.body);
+    expect(opts.headers['X-OpenLiveness-Signature']).toBe(expected);
+  });
+
+  it('H-a: hands the vetted (address, family) to deliverPinned so the socket cannot re-resolve', async () => {
+    // The DNS-rebind defense: resolveAndCheckHost returns the IP it vetted,
+    // and callWebhook must forward *that* IP to deliverPinned (which pins it
+    // on the socket via node:http lookup). If we only passed the hostname,
+    // an attacker's authoritative DNS could answer safe-IP at check time
+    // and 169.254.169.254 at connect time — bypassing every guard.
+    process.env.NODE_ENV = 'production';
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    await callWebhook(
+      makeSession({ webhook_url: 'https://8.8.8.8/hook' }),
+      'tok',
+      att,
+      false,
+      log,
+    );
+    const [, opts] = mockDeliverPinned.mock.calls[0] as [
+      string,
+      { address: string; family: 4 | 6 },
+    ];
+    expect(opts.address).toBe('8.8.8.8');
+    expect(opts.family).toBe(4);
+  });
+
+  it('M-c: swallows delivery failure (non-2xx) without throwing', async () => {
+    // A dead or hostile webhook must never fail the session. We log and
+    // move on — reconciliation is the RP's job via /status.
+    process.env.NODE_ENV = 'production';
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    mockDeliverPinned.mockResolvedValueOnce({ ok: false, status: 502 });
+    await expect(
+      callWebhook(
+        makeSession({ webhook_url: 'https://8.8.8.8/hook' }),
+        'tok',
+        att,
+        false,
+        log,
+      ),
+    ).resolves.toBeUndefined();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 502 }),
+      expect.stringMatching(/non-2xx/),
+    );
+  });
+
+  it('M-c: swallows network error from deliverPinned without throwing', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    mockDeliverPinned.mockRejectedValueOnce(new Error('ECONNRESET'));
+    await expect(
+      callWebhook(
+        makeSession({ webhook_url: 'https://8.8.8.8/hook' }),
+        'tok',
+        att,
+        false,
+        log,
+      ),
+    ).resolves.toBeUndefined();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringMatching(/delivery failed/),
+    );
   });
 });

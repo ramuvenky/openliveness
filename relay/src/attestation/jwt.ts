@@ -63,19 +63,33 @@ export async function issueAttestationJWT(
     .sign(await getPrivateKey());
 }
 
+// N-c: cache the parsed JWKS but auto-refresh after JWKS_CACHE_TTL_MS so
+// an on-disk key rotation lands within the TTL without a server restart.
+// 5 minutes matches the Cache-Control: max-age we advertise to clients at
+// /cdl/.well-known/jwks.json — a client's cached copy is no fresher than
+// ours, so there's no benefit to a tighter server-side window.
+export const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
 let jwksCache: { keys: unknown[] } | null = null;
+let jwksCachedAt = 0;
 
-export async function getJwks() {
-  if (!jwksCache) {
+// Exported for tests so they can advance "now" without relying on real time.
+export function _now(): number {
+  return Date.now();
+}
+
+export async function getJwks(now: number = _now()) {
+  if (!jwksCache || now - jwksCachedAt > JWKS_CACHE_TTL_MS) {
     const pem = readFileSync(config().jwtPublicKeyPath, 'utf8');
     // round trip through KeyObject so a private key file is never exposed by mistake
     const spki = createPublicKey(pem).export({ type: 'spki', format: 'pem' }).toString();
     const jwk = await exportJWK(await importSPKI(spki, 'ES256'));
     jwksCache = { keys: [{ ...jwk, kid: KEY_ID, alg: 'ES256', use: 'sig' }] };
+    jwksCachedAt = now;
   }
   return jwksCache;
 }
 
 export function resetJwksCache() {
   jwksCache = null;
+  jwksCachedAt = 0;
 }

@@ -8,11 +8,46 @@ import { now, PhoneInbound, PhoneMessage } from './messages';
 
 const MAX_PHONE_CONNECTIONS = 3;
 
+// L-a: hard ceiling on how long the per-session reconnect counter can live
+// in Redis. The session TTL (with grace) is ~1h+ which is way longer than
+// any reasonable phone-connect burst. 5 minutes catches legitimate
+// reconnects (page refresh, flaky mobile network) and lets stale keys
+// expire so a leaked session_id can't be used to burn quota long after.
+export const PHONE_COUNTER_MAX_TTL = 300;
+export function phoneCounterTtl(expiresAt: string): number {
+  return Math.min(sessionTtlSeconds(expiresAt), PHONE_COUNTER_MAX_TTL);
+}
+
 function reply(ws: WebSocket, msg: PhoneMessage) {
   ws.send(JSON.stringify(msg));
 }
 
 const BROWSER_AUTH_TIMEOUT_MS = 5000;
+
+// H-b: cap concurrent WS connections per client IP. The browser handler
+// accepts the socket *before* authentication (the token arrives in the
+// first frame), so without a cap one attacker IP can hold thousands of
+// pre-auth sockets open and consume file descriptors / event-loop slots.
+// 20 is well above any legitimate single-user count (a dev with many tabs
+// + a few phones), and far below a floodable number. The map is in-process
+// — this cap is per-replica, which is intentional: a horizontal scale-out
+// gives the attacker proportionally more capacity, which matches how we
+// scale legitimate traffic.
+const MAX_WS_PER_IP = 20;
+const wsPerIp = new Map<string, number>();
+export function _getWsCountForIp(ip: string): number {
+  return wsPerIp.get(ip) ?? 0;
+}
+function incWsIp(ip: string): number {
+  const n = (wsPerIp.get(ip) ?? 0) + 1;
+  wsPerIp.set(ip, n);
+  return n;
+}
+function decWsIp(ip: string) {
+  const n = (wsPerIp.get(ip) ?? 1) - 1;
+  if (n <= 0) wsPerIp.delete(ip);
+  else wsPerIp.set(ip, n);
+}
 
 export async function registerWebsocketRoutes(app: FastifyInstance) {
   // Browser side. The poll_token used to arrive on the URL as ?token= but
@@ -29,6 +64,16 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
     async (connection, req) => {
       const ws = connection.socket;
       const { id } = req.params;
+      // Per-IP cap first — before any session load or auth work. An attacker
+      // flooding sockets must not get free Redis reads or the 5s auth timer.
+      const ip = req.ip;
+      if (incWsIp(ip) > MAX_WS_PER_IP) {
+        decWsIp(ip);
+        req.log.warn({ ip_hash_tag: 'ws_per_ip_cap' }, 'browser WS rejected: per-IP cap exceeded');
+        ws.close(1013); // 1013 = try again later
+        return;
+      }
+      ws.on('close', () => decWsIp(ip));
       const session = await loadSession(id);
 
       const authenticated = await (async () => {
@@ -158,6 +203,14 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
     async (connection, req) => {
       const ws = connection.socket;
       const { id } = req.params;
+      const ip = req.ip;
+      if (incWsIp(ip) > MAX_WS_PER_IP) {
+        decWsIp(ip);
+        req.log.warn({ ip_hash_tag: 'ws_per_ip_cap' }, 'phone WS rejected: per-IP cap exceeded');
+        ws.close(1013);
+        return;
+      }
+      ws.on('close', () => decWsIp(ip));
       const session = await loadSession(id);
 
       if (!session) {
@@ -184,11 +237,7 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
       const redis = getRedis();
       const countKey = `cdl:session:${id}:phone_connections`;
       const count = await redis.incr(countKey);
-      // Keep the counter aligned with the session's own TTL (expires_at + grace)
-      // rather than pinning it to 24h. A leaked session_id otherwise lets an
-      // attacker burn phone-connection quota for a full day after the session
-      // is logically dead.
-      await redis.expire(countKey, sessionTtlSeconds(session.expires_at));
+      await redis.expire(countKey, phoneCounterTtl(session.expires_at));
       if (count > MAX_PHONE_CONNECTIONS) {
         reply(ws, { type: 'session_invalid', reason: 'too_many_reconnects', timestamp: now() });
         ws.close();
@@ -219,6 +268,14 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
           return;
         }
         if (msg.type === 'liveness_started') {
+          // M-a: don't regress terminal state. If /complete already landed
+          // (or the session expired) the phone's late liveness_started frame
+          // used to overwrite 'complete'/'failed'/'expired' with 'processing',
+          // corrupting the state machine and causing /status to lie.
+          const latest = await loadSession(id);
+          if (!latest || latest.state !== 'phone_connected') {
+            return;
+          }
           await updateSession(id, { state: 'processing' });
           toBrowser(id, { type: 'liveness_started', timestamp: now() });
         } else if (msg.type === 'processing_update') {

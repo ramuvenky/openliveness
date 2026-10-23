@@ -12,6 +12,7 @@ import { loadSession, saveSession, updateSession } from '../session/store';
 import { getCachedToken } from '../session/tokenCache';
 import { CDLSession } from '../session/types';
 import { base64url, safeEqual } from '../utils/crypto';
+import { normalizeWebhookUrl } from '../session/webhook';
 
 const initiateBody = z.object({
   relying_party: z.string().min(1).max(253),
@@ -25,6 +26,19 @@ export async function sessionRoutes(app: FastifyInstance) {
     if (!parsed.success) throw new CDLError('ERR_SCHEMA_INVALID', parsed.error.issues[0]?.message);
     const body = parsed.data;
     const c = config();
+
+    // N-b: validate webhook_url synchronously at /initiate so an RP that
+    // posts a garbage URL gets immediate feedback instead of a silent
+    // dispatch-time failure (dispatch logs and continues; the RP has no
+    // signal). Scheme/loopback checks are pure-string; the SSRF/DNS pin
+    // runs later at dispatch where it belongs.
+    let normalizedWebhookUrl: string | null = null;
+    if (body.webhook_url !== undefined) {
+      normalizedWebhookUrl = normalizeWebhookUrl(body.webhook_url, c.allowLoopbackWebhooks);
+      if (!normalizedWebhookUrl) {
+        throw new CDLError('ERR_SCHEMA_INVALID', 'webhook_url is not an https URL');
+      }
+    }
 
     const sessionId = uuidv4();
     const challengeId = uuidv4();
@@ -51,7 +65,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       attestation_hash: null,
       jwt_hash: null,
       jwt_issued_at: null,
-      webhook_url: body.webhook_url ?? null,
+      webhook_url: normalizedWebhookUrl,
     };
     await saveSession(session);
 
@@ -154,13 +168,17 @@ export async function sessionRoutes(app: FastifyInstance) {
   );
 
   // Android only. See google.ts for why the liveness decision is not part of the nonce.
-  app.post<{ Params: { id: string } }>('/cdl/session/:id/integrity-nonce', async (req) => {
-    const session = await loadSession(req.params.id);
-    if (!session) throw new CDLError('ERR_SESSION_NOT_FOUND');
-    if (Date.parse(session.expires_at) < Date.now()) throw new CDLError('ERR_SESSION_EXPIRED');
-    if (session.state === 'complete' || session.state === 'failed') {
-      throw new CDLError('ERR_SESSION_ALREADY_COMPLETE');
-    }
-    return { nonce: await createIntegrityNonce(session.session_id, session.challenge_id) };
-  });
+  app.post<{ Params: { id: string } }>(
+    '/cdl/session/:id/integrity-nonce',
+    { config: limit(LIMITS.integrity) },
+    async (req) => {
+      const session = await loadSession(req.params.id);
+      if (!session) throw new CDLError('ERR_SESSION_NOT_FOUND');
+      if (Date.parse(session.expires_at) < Date.now()) throw new CDLError('ERR_SESSION_EXPIRED');
+      if (session.state === 'complete' || session.state === 'failed') {
+        throw new CDLError('ERR_SESSION_ALREADY_COMPLETE');
+      }
+      return { nonce: await createIntegrityNonce(session.session_id, session.challenge_id) };
+    },
+  );
 }

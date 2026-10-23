@@ -8,6 +8,24 @@ import { healthRoutes } from './routes/health';
 import { sessionRoutes } from './routes/session';
 import { registerWebsocketRoutes } from './websocket/handler';
 
+// Known-weak placeholders that have shipped in docs / compose files. If any
+// of these ever lands as the production nonce HMAC key, an attacker with
+// access to the repo can reproduce every integrity nonce the relay issues.
+// The check is case-insensitive and trims whitespace so near-misses still
+// trip the guard. Exported for tests.
+export const WEAK_INTEGRITY_SECRETS = new Set([
+  '',
+  'dev-secret',
+  'dev-secret-change-in-production',
+  'change-me',
+  'changeme',
+  'secret',
+  'password',
+]);
+export function isWeakIntegritySecret(secret: string): boolean {
+  return WEAK_INTEGRITY_SECRETS.has(secret.trim().toLowerCase());
+}
+
 export async function buildServer(): Promise<FastifyInstance> {
   const c = config();
   // HARDWARE_ATTESTATION=stub makes verifyHardware return attested=true
@@ -19,6 +37,17 @@ export async function buildServer(): Promise<FastifyInstance> {
   if (c.nodeEnv === 'production' && c.hardwareMode === 'stub') {
     throw new Error(
       'refusing to start: HARDWARE_ATTESTATION=stub is not allowed when NODE_ENV=production',
+    );
+  }
+  // N-e: refuse to boot with an empty or well-known INTEGRITY_NONCE_SECRET
+  // in production. The default compose file ships a documented
+  // "dev-secret-change-in-production" placeholder; a deploy that copies
+  // the compose into production without rotating the secret inherits a
+  // nonce HMAC key that anyone with the repo can reproduce. Catching this
+  // at boot is louder than a startup warn.
+  if (c.nodeEnv === 'production' && isWeakIntegritySecret(c.integritySecret)) {
+    throw new Error(
+      'refusing to start: INTEGRITY_NONCE_SECRET is empty or a well-known placeholder in production',
     );
   }
   const app = Fastify({
@@ -46,7 +75,16 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   await registerSecurity(app);
   await registerRateLimit(app);
-  await app.register(websocket);
+  // L-b: cap inbound WS frame size. The only frames clients send are tiny
+  // JSON objects — browser auth (~200B), phone auth/liveness_started/
+  // processing_update (~300B). An 8 KiB ceiling is 20x the largest
+  // legitimate frame and refuses multi-MB floods before they reach the
+  // JSON parser. Applies to both /ws and /device routes.
+  await app.register(websocket, {
+    options: {
+      maxPayload: 8 * 1024,
+    },
+  });
   await app.register(healthRoutes);
   await app.register(sessionRoutes);
   await app.register(deviceRoutes);

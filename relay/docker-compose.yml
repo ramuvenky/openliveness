@@ -19,8 +19,13 @@ services:
         condition: service_healthy
   redis:
     image: redis:7-alpine
+    # N-d: bind Redis to loopback only. The relay container reaches it over
+    # the compose network; the previous "6379:6379" exposed Redis on every
+    # host interface, which has caused real "steal my unauthenticated
+    # Redis" incidents on dev laptops. Operators who need host access can
+    # override this mapping.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

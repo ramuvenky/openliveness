@@ -4,6 +4,7 @@ import { isIP } from 'net';
 import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../config';
 import { CDLAttestation, CDLSession } from './types';
+import { deliverPinned } from './webhookDelivery';
 
 // Webhook destinations are provided by the relying party and stored on the
 // session. Treat them as attacker-influenced input: an operator misconfig or
@@ -98,17 +99,36 @@ export function isBlockedIp(ip: string, allowLoopback = false): boolean {
   return false;
 }
 
-export async function resolveAndCheckHost(host: string, allowLoopback: boolean): Promise<void> {
+// Returns the one address we vetted so the caller can hand it to deliverPinned
+// as the socket-level lookup result. If we only *checked* here and let fetch
+// do its own DNS at connect time, an attacker whose authoritative DNS server
+// returns a safe IP for this probe and a blocked IP (169.254.169.254, 10.x.x.x
+// cloud metadata) at connect time would walk straight past the guard. By
+// pinning the resolved address and refusing to re-resolve downstream, the
+// kernel only ever dials an IP we have already approved.
+export interface ResolvedTarget {
+  address: string;
+  family: 4 | 6;
+}
+
+export async function resolveAndCheckHost(
+  host: string,
+  allowLoopback: boolean,
+): Promise<ResolvedTarget> {
   const stripped = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
   if (isIP(stripped)) {
     if (isBlockedIp(stripped, allowLoopback)) throw new Error('ssrf: blocked ip literal');
-    return;
+    return { address: stripped, family: isIP(stripped) === 6 ? 6 : 4 };
   }
   const addresses = await lookup(stripped, { all: true });
   if (addresses.length === 0) throw new Error('ssrf: host did not resolve');
   for (const { address } of addresses) {
     if (isBlockedIp(address, allowLoopback)) throw new Error('ssrf: blocked ip via dns');
   }
+  // Prefer the first vetted address — all were checked above. family: 4|6
+  // matches Node's net.isIP() return and the `lookup` cb contract.
+  const chosen = addresses[0];
+  return { address: chosen.address, family: chosen.family === 6 ? 6 : 4 };
 }
 
 export function signWebhookBody(secret: string, body: string): string {
@@ -134,8 +154,9 @@ export async function callWebhook(
     return;
   }
   const parsed = new URL(url);
+  let resolved: ResolvedTarget;
   try {
-    await resolveAndCheckHost(parsed.hostname, allowLoopback);
+    resolved = await resolveAndCheckHost(parsed.hostname, allowLoopback);
   } catch (e) {
     log.warn(
       { session_id: session.session_id, host: parsed.hostname, reason: (e as Error).message },
@@ -166,19 +187,19 @@ export async function callWebhook(
   const signature = signWebhookBody(cfg.webhookSigningSecret, body);
 
   try {
-    const res = await fetch(url, {
-      method: 'POST',
+    const res = await deliverPinned(url, {
       headers: {
         'Content-Type': 'application/json',
         'X-OpenLiveness-Signature': signature,
       },
-      signal: AbortSignal.timeout(5000),
       body,
+      timeoutMs: 5000,
+      // Hand the vetted (address, family) to deliverPinned so the socket's
+      // lookup never re-queries DNS at connect time.
+      address: resolved.address,
+      family: resolved.family,
     });
     if (!res.ok) {
-      // Non-2xx is logged separately from a hard failure (DNS, TCP reset,
-      // 5s timeout). Delivery is still fire-and-forget today: see TODO
-      // below for the retry queue work tracked outside this PR.
       log.warn(
         { session_id: session.session_id, status: res.status },
         'webhook delivery non-2xx',

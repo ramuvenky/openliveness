@@ -43,6 +43,19 @@ class AttestationBuilderTest {
         unmockkObject(SigningService)
     }
 
+    // Infrastructure guard — proves the real org.json is on the test
+    // classpath, not Android's stub. Under isReturnDefaultValues=true the
+    // stub's JSONObject.getString returns null, which silently flips every
+    // assertEquals("x", obj.getString(...)) in this file into a failure
+    // with no indication the parser itself is the problem. If this test
+    // trips, re-add `testImplementation("org.json:json:...")` to
+    // build.gradle.kts rather than chasing the field-level failures.
+    @Test
+    fun `org dot json is the real impl on the test classpath`() {
+        val obj = JSONObject("""{"k":"v"}""")
+        assertEquals("v", obj.getString("k"))
+    }
+
     private fun stubSession(): CDLSession {
         val payload = QRPayload(
             session_id = "s1",

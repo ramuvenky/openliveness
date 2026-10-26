@@ -48,6 +48,11 @@ dependencies {
     // mockk powers the Phase 2 drift tests that need a stub Context /
     // PlayIntegrityService without pulling in Robolectric.
     testImplementation("io.mockk:mockk:1.13.8")
+    // Real org.json shadows the Android stub on the JVM unit-test classpath.
+    // Without this, JSONObject.getString() returns null under
+    // isReturnDefaultValues=true, which silently breaks any test that
+    // parses the attestation JSON by field name.
+    testImplementation("org.json:json:20240303")
 
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test:runner:1.5.2")

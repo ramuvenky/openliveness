@@ -18,6 +18,13 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    // Phase 2 drift tests touch AttestationBuilder which calls
+    // Settings.Secure.getString(). In JVM unit tests android.* methods
+    // throw by default; returnDefaultValues=true makes them return null
+    // and the builder handles that gracefully ("unknown" fallback).
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 tasks.withType<Test>().configureEach {
@@ -38,6 +45,9 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    // mockk powers the Phase 2 drift tests that need a stub Context /
+    // PlayIntegrityService without pulling in Robolectric.
+    testImplementation("io.mockk:mockk:1.13.8")
 
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test:runner:1.5.2")

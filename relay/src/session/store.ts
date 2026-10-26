@@ -75,6 +75,7 @@ export function disconnectAllRedis() {
 const NULLABLE = [
   'liveness_decision',
   'assurance_level',
+  'hw_attestation_status',
   'attestation_hash',
   'jwt_hash',
   'jwt_issued_at',

@@ -80,6 +80,17 @@ export function checkAssurance(att: CDLAttestation, session: CDLSession, hardwar
   if (att.assurance_level === 'IAL2' && !hardwareVerified) {
     throw new CDLError('ERR_ATTEST_REQUIRED', 'IAL2 claimed without verified attestation');
   }
+  // Cross-check hw_attestation_status against the claimed assurance level.
+  // IAL2 implies the device successfully attested — a client that stamps
+  // IAL2 but reports status != 'ok' is inconsistent (either lying or buggy);
+  // reject rather than silently accept. 'unsupported'/'failed' with
+  // software_only is the expected downgrade path and passes through.
+  if (att.hw_attestation_status === 'ok' && att.assurance_level !== 'IAL2') {
+    throw new CDLError('ERR_SCHEMA_INVALID', 'hw_attestation_status=ok requires assurance_level=IAL2');
+  }
+  if (att.assurance_level === 'IAL2' && att.hw_attestation_status && att.hw_attestation_status !== 'ok') {
+    throw new CDLError('ERR_SCHEMA_INVALID', 'assurance_level=IAL2 requires hw_attestation_status=ok');
+  }
   const need = RANK[session.assurance_required] ?? 0;
   if (RANK[att.assurance_level] < need) {
     throw new CDLError('ERR_ATTEST_REQUIRED', `${session.assurance_required} required`);

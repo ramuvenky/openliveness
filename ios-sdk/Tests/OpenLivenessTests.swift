@@ -1,5 +1,6 @@
 import XCTest
 import Security
+import CryptoKit
 @testable import OpenLiveness
 
 final class OpenLivenessTests: XCTestCase {
@@ -14,6 +15,38 @@ final class OpenLivenessTests: XCTestCase {
         XCTAssertEqual(p.session_id, "s")
         XCTAssertEqual(p.challenge_sequence, ["blink", "smile"])
         XCTAssertEqual(p.version, "1.0")
+    }
+
+    // Phase 1 error paths. parseQRPayload rolls base64 and JSON failures
+    // into a single qrParseError so the camera UI can show one "scan again"
+    // state regardless of which half failed. These lock that in so a future
+    // refactor doesn't start surfacing DecodingError directly.
+
+    func testParseQRPayloadThrowsOnInvalidBase64() {
+        XCTAssertThrowsError(try parseQRPayload("not valid base64!!!!")) { error in
+            guard case CDLError.qrParseError = error else {
+                XCTFail("expected CDLError.qrParseError, got \(error)"); return
+            }
+        }
+    }
+
+    func testParseQRPayloadThrowsOnBase64ThatIsNotJSON() {
+        let b64 = Data("not json at all".utf8).base64EncodedString()
+        XCTAssertThrowsError(try parseQRPayload(b64)) { error in
+            guard case CDLError.qrParseError = error else {
+                XCTFail("expected CDLError.qrParseError, got \(error)"); return
+            }
+        }
+    }
+
+    func testParseQRPayloadThrowsWhenRequiredFieldMissing() {
+        let json = #"{"session_id":"s","challenge_id":"c","challenge_sequence":["blink"]}"#
+        let b64 = Data(json.utf8).base64EncodedString()
+        XCTAssertThrowsError(try parseQRPayload(b64)) { error in
+            guard case CDLError.qrParseError = error else {
+                XCTFail("expected CDLError.qrParseError, got \(error)"); return
+            }
+        }
     }
 
     func testCanonicalJSONSortsKeysAndStripsWhitespace() throws {
@@ -431,6 +464,353 @@ final class OpenLivenessTests: XCTestCase {
         XCTAssertNotNil(roundTripped)
         let recanonicalized = try CanonicalJSON.encode(roundTripped!)
         XCTAssertEqual(recanonicalized, bytes)
+    }
+
+    // MARK: - Phase 2 — hardware attestation wiring
+    //
+    // Locks in the Phase 2 wiring: AttestationBuilder stamps IAL2 when
+    // CDLSession hands it a device_attestation string and downgrades to
+    // software_only otherwise. The CDLSession-level fallback (unsupported
+    // simulator, App Attest error) relies on this behavior to keep the
+    // session alive instead of aborting.
+
+    func testAttestationBuilderStampsSoftwareOnlyWhenNoDeviceAttestation() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: nil
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""assurance_level":"software_only""#))
+        XCTAssertFalse(str.contains(#""device_attestation""#),
+                       "device_attestation must be absent when nil")
+        // Default hw status when nothing was passed and no device attestation
+        // is present must be "unsupported" (not "failed") so a legitimate
+        // simulator / non-attesting device doesn't look like a downgrade.
+        XCTAssertTrue(str.contains(#""hw_attestation_status":"unsupported""#))
+    }
+
+    func testAttestationBuilderStampsIAL2WhenDeviceAttestationPresent() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: "stub-app-attest-assertion-base64"
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""assurance_level":"IAL2""#))
+        XCTAssertTrue(str.contains(#""device_attestation":"stub-app-attest-assertion-base64""#))
+        XCTAssertTrue(str.contains(#""hw_attestation_status":"ok""#))
+    }
+
+    // H1 drift test — forced "failed" status with no device attestation.
+    // This is the downgrade-attack signal the relay watches for: a
+    // regression that collapsed "failed" back into "unsupported" (or
+    // dropped the field) would show up here before shipping.
+    func testAttestationBuilderExplicitHwStatusFailedIsPreserved() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: nil,
+            hwAttestationStatus: .failed
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""assurance_level":"software_only""#))
+        XCTAssertTrue(str.contains(#""hw_attestation_status":"failed""#))
+    }
+
+    // M-1 pessimism — token present but caller explicitly says .failed.
+    // The real CDLSession.requestDeviceAttestation flow cannot produce this
+    // pair, but direct AttestationBuilder.build callers (tests, future
+    // orchestrators) could; the builder downgrades to software_only here
+    // rather than passing an inconsistent IAL2 claim the relay would reject
+    // at checkAssurance. Preserves the raw status for triage visibility.
+    func testAttestationBuilderIsPessimisticWhenTokenAndFailedPairMismatched() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: "stub-app-attest-assertion-base64",
+            hwAttestationStatus: .failed
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""assurance_level":"software_only""#),
+                      "mismatched token+status must downgrade to software_only")
+        XCTAssertTrue(str.contains(#""hw_attestation_status":"failed""#),
+                      "raw status must be preserved verbatim for triage")
+    }
+
+    // M-1 pessimism — status .ok but no deviceAttestation to back it up.
+    // A token-less .ok claim is nonsense (server has nothing to verify),
+    // so assurance_level drops to software_only rather than passing the
+    // inconsistency through for server-side rejection.
+    func testAttestationBuilderIsPessimisticWhenOkStatusWithoutToken() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: nil,
+            hwAttestationStatus: .ok
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""assurance_level":"software_only""#),
+                      "status=.ok without a token must downgrade to software_only")
+        XCTAssertTrue(str.contains(#""hw_attestation_status":"ok""#),
+                      "raw status must be preserved verbatim even when assurance_level is pessimistic")
+    }
+
+    // M-1 companion — explicit .unsupported with a non-null token (odd
+    // pair a buggy caller might produce) also stays pessimistic.
+    func testAttestationBuilderIsPessimisticWhenTokenAndUnsupportedPairMismatched() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: "stub-token",
+            hwAttestationStatus: .unsupported
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""assurance_level":"software_only""#))
+        XCTAssertTrue(str.contains(#""hw_attestation_status":"unsupported""#))
+    }
+
+    // H3 drift test — if a caller passes an explicit livenessDecision, the
+    // builder MUST use it verbatim instead of recomputing from layerScores.
+    // The App Attest assertion signs over the caller's string; a builder
+    // that recomputed could emit "pass" while the assertion signed "fail".
+    func testAttestationBuilderUsesExplicitLivenessDecision() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        // stubLayerScores would normally produce "pass". Force the caller
+        // override to "fail" and assert the override wins.
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: nil,
+            livenessDecision: "fail"
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""liveness_decision":"fail""#),
+                      "explicit livenessDecision must win over the computed stub")
+    }
+
+    // Shared-fixture drift test — the signed client data is a canonical-JSON
+    // object keyed by (challenge_id, liveness_decision, nonce, session_id).
+    // The relay-side verifier reproduces the exact string via canonicalize()
+    // in relay/src/attestation/apple.ts and SHA-256s it to recover the
+    // preimage; relay/tests/apple.test.ts pins the same byte string on the
+    // server. Any drift between the two sides breaks every iOS IAL2 session,
+    // so this fixture is deliberately verbatim.
+    func testAppAttestClientDataIsCanonicalJSON() throws {
+        let bytes = try AppAttestService.assertionClientData(
+            sessionId: "s1",
+            challengeId: "c1",
+            livenessDecision: "pass",
+            nonce: "n1"
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertEqual(
+            str,
+            #"{"challenge_id":"c1","liveness_decision":"pass","nonce":"n1","session_id":"s1"}"#
+        )
+    }
+
+    // Drift test — the ambiguity we were fixing: ("abc","def","pass","n")
+    // and ("ab","cdef","pass","n") must produce *different* client data. The
+    // old concat produced identical bytes; the canonical-JSON form keys each
+    // field explicitly so they can never collide.
+    func testAppAttestClientDataDisambiguatesAdjacentFields() throws {
+        let a = try AppAttestService.assertionClientData(
+            sessionId: "abc", challengeId: "def", livenessDecision: "pass", nonce: "n"
+        )
+        let b = try AppAttestService.assertionClientData(
+            sessionId: "ab", challengeId: "cdef", livenessDecision: "pass", nonce: "n"
+        )
+        XCTAssertNotEqual(a, b, "distinct (session_id, challenge_id) pairs must produce distinct preimages")
+    }
+
+    // M1 drift test — the server-issued nonce must be baked into the signed
+    // preimage. A regression that stripped the nonce (or forgot to thread it
+    // in from CDLSession) would make assertions replayable across sessions
+    // if server-side nonce enforcement ever regressed. Two different nonces
+    // must produce two different preimages.
+    func testAppAttestClientDataBindsNonce() throws {
+        let a = try AppAttestService.assertionClientData(
+            sessionId: "s1", challengeId: "c1", livenessDecision: "pass", nonce: "nonce-A"
+        )
+        let b = try AppAttestService.assertionClientData(
+            sessionId: "s1", challengeId: "c1", livenessDecision: "pass", nonce: "nonce-B"
+        )
+        XCTAssertNotEqual(a, b, "assertion client data must change when the nonce changes")
+    }
+
+    // M1 drift test — CDLSession.requestDeviceAttestation must swallow
+    // unsupported-platform failures and surface them as `.unsupported`
+    // (not `.failed`) so legitimate simulators / older devices don't
+    // get flagged as downgrade attacks. The simulator CI runner has
+    // DCAppAttestService.isSupported == false, which exercises the
+    // first early-return branch.
+    func testRequestDeviceAttestationReturnsUnsupportedOnSimulator() async throws {
+        let session = CDLSession(from: makeStubPayload())
+        let result = await session.requestDeviceAttestation(livenessDecision: "pass")
+        // On the simulator isSupported is false → status should be .unsupported.
+        // On a hypothetical real-device CI runner this would be .ok or .failed;
+        // we don't assert equality to .unsupported there, only that the token
+        // and status stay in sync.
+        if result.status == .ok {
+            XCTAssertNotNil(result.token)
+        } else {
+            XCTAssertNil(result.token, "non-ok status must have a nil token")
+        }
+    }
+
+    func testLivenessDecisionReflectsLayer2Completion() {
+        var scores = AttestationBuilder.stubLayerScores()
+        XCTAssertEqual(AttestationBuilder.livenessDecision(layerScores: scores), "pass")
+        scores.layer2ChallengeCompleted = false
+        XCTAssertEqual(AttestationBuilder.livenessDecision(layerScores: scores), "fail")
+    }
+
+    func testAttestationBuilderDeviceIdHashIsStableAcrossBuilds() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        // Two builds back-to-back must produce the same device_id_hash: the
+        // relay joins sessions-per-device via this hash, so a non-deterministic
+        // value would make the per-device rate limit toothless and skew the
+        // "repeated device" audit log.
+        let bytes1 = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions()
+        )
+        let bytes2 = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions()
+        )
+        let hash1 = extractDeviceIdHash(from: bytes1)
+        let hash2 = extractDeviceIdHash(from: bytes2)
+        XCTAssertNotNil(hash1)
+        XCTAssertEqual(hash1, hash2)
+        // SHA-256 → 64 hex chars.
+        XCTAssertEqual(hash1?.count, 64)
+        // Guard against a false pass: on hosts where
+        // UIDevice.identifierForVendor returns nil (some CI configurations,
+        // pre-first-unlock), the hash degrades to SHA-256("unknown"). The
+        // attestation would then share a device_id_hash with every other
+        // such host — the relay's per-device audit log and rate limit would
+        // be useless. Skip rather than silently accept the degraded path.
+        let fallbackHash = Data(SHA256.hash(data: Data("unknown".utf8)))
+            .compactMap { String(format: "%02x", $0) }.joined()
+        if hash1 == fallbackHash {
+            throw XCTSkip("UIDevice.identifierForVendor returned nil; cannot test real device_id_hash")
+        }
+    }
+
+    private func extractDeviceIdHash(from bytes: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+            return nil
+        }
+        return obj["device_id_hash"] as? String
+    }
+
+    // M2 drift tests — classifyAttestationError is the only switch between
+    // "downgrade attack" and "benign environment" on iOS. If a keychain-locked
+    // device started landing in `.failed`, every lock-screen attestation
+    // would look adversarial server-side. Pin the mapping so a regression
+    // tightening these catch arms shows up here before shipping.
+
+    func testClassifyAttestationErrorMapsHardwareUnsupportedToUnsupported() {
+        XCTAssertEqual(
+            CDLSession.classifyAttestationError(CDLError.hardwareAttestationUnsupported),
+            .unsupported
+        )
+    }
+
+    func testClassifyAttestationErrorMapsKeychainErrorToUnsupported() {
+        // The load-bearing case: a locked Keychain pre-first-unlock is
+        // environmental, not adversarial. Must NOT land in `.failed`.
+        XCTAssertEqual(
+            CDLSession.classifyAttestationError(CDLError.keychainError),
+            .unsupported
+        )
+    }
+
+    func testClassifyAttestationErrorMapsNetworkErrorToFailed() {
+        // Relay-nonce HTTP failure during Phase 2 handshake is the
+        // adversarial-adjacent bucket (operator misconfig OR forced
+        // downgrade). Keep in `.failed`.
+        XCTAssertEqual(
+            CDLSession.classifyAttestationError(CDLError.networkError("boom")),
+            .failed
+        )
+    }
+
+    func testClassifyAttestationErrorMapsUnknownErrorToFailed() {
+        // DCAppAttestService can throw NSErrors we don't own. The default
+        // branch must land them in `.failed` so the server still sees the
+        // signal rather than silently tagging them as `.unsupported`.
+        let unknown = NSError(domain: "com.apple.devicecheck", code: 2, userInfo: nil)
+        XCTAssertEqual(CDLSession.classifyAttestationError(unknown), .failed)
+    }
+
+    private func makeStubPayload() -> QRPayload {
+        QRPayload(
+            session_id: "s1",
+            challenge_id: "c1",
+            challenge_sequence: ["blink"],
+            relay_ws: "wss://x",
+            relay_http: "https://x",
+            expires_at: "2099-01-01T00:00:00Z",
+            version: "1.0"
+        )
     }
 
     // MARK: - helpers

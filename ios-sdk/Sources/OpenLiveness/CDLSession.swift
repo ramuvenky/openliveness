@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Entry point for the mobile side of a CDL session. Construct from the
 /// scanned QR payload, call `start()`, and the SDK walks the full flow:
@@ -33,16 +34,93 @@ public final class CDLSession {
 
         let scores = AttestationBuilder.stubLayerScores()
         let ambient = AmbientConditions()
+        // Compute the decision once so the App Attest assertion and the
+        // posted attestation sign/stamp the identical string, even if the
+        // decision function later becomes non-deterministic.
+        let decision = AttestationBuilder.livenessDecision(layerScores: scores)
+        let hw = await requestDeviceAttestation(livenessDecision: decision)
         let attestation = try AttestationBuilder.build(
             session: self,
             layerScores: scores,
             ambient: ambient,
-            deviceAttestation: nil
+            deviceAttestation: hw.token,
+            livenessDecision: decision,
+            hwAttestationStatus: hw.status
         )
         return try await relay.submitAttestation(
             sessionId: sessionId,
             attestation: attestation
         )
+    }
+
+    /// Result of the hardware-attestation attempt. `token` is non-nil only
+    /// when `status == .ok`. The status field lets the relay distinguish
+    /// "device cannot attest" (simulator, legitimate software_only) from
+    /// "device tried and failed" — the second clustering on previously-ok
+    /// devices is a downgrade-attack signal.
+    struct HardwareAttestationResult {
+        let token: String?
+        let status: AttestationBuilder.HwAttestationStatus
+    }
+
+    // Dedicated signpost for hardware-attestation failures. The server sees
+    // one of three bucket labels (ok / unsupported / failed) — without a
+    // local log the `failed` bucket is opaque in triage. Public privacy
+    // level is deliberate: the strings here are OSStatus codes and system
+    // error descriptions, not user data.
+    static let log = Logger(subsystem: "dev.openliveness", category: "attestation")
+
+    /// Attempts hardware attestation via App Attest. Non-adversarial failures
+    /// (simulator, keychain locked pre-first-unlock) are tagged `.unsupported`
+    /// so the server-side downgrade heuristic doesn't light up for benign
+    /// environmental issues. Only unexpected failures land in `.failed`, which
+    /// is the bucket the relay watches for clustering.
+    func requestDeviceAttestation(livenessDecision: String) async -> HardwareAttestationResult {
+        let service = AppAttestService(relay: relay)
+        guard service.isSupported else {
+            return HardwareAttestationResult(token: nil, status: .unsupported)
+        }
+        do {
+            _ = try await service.registerKey()
+            // Fetch a fresh, single-use integrity nonce. Must happen AFTER
+            // registerKey (so a device that fails Phase 1 doesn't burn a
+            // nonce) and BEFORE generateAssertion (the nonce is baked into
+            // the signed client data, matching the server-side verifier).
+            let nonce = try await relay.requestIntegrityNonce(sessionId: sessionId)
+            let assertion = try await service.generateAssertion(
+                sessionId: sessionId,
+                challengeId: challengeId,
+                livenessDecision: livenessDecision,
+                nonce: nonce
+            )
+            return HardwareAttestationResult(token: assertion, status: .ok)
+        } catch {
+            let status = CDLSession.classifyAttestationError(error)
+            // Log only the adversarial-adjacent bucket. Environmental misses
+            // (locked keychain, simulator-style unsupported) are quiet; the
+            // `failed` bucket is the one the server clusters on so we want
+            // enough local breadcrumbs to triage it.
+            if status == .failed {
+                CDLSession.log.warning(
+                    "hardware attestation failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return HardwareAttestationResult(token: nil, status: status)
+        }
+    }
+
+    /// Maps an error from the App Attest / Keychain / relay-nonce pipeline
+    /// to the `hw_attestation_status` wire value. Internal so the drift test
+    /// can pin the mapping without having to inject an AppAttestService stub.
+    ///
+    /// The distinction is server-visible: `.failed` is the downgrade signal
+    /// the relay clusters on, so benign environmental errors (Keychain
+    /// pre-first-unlock) must map to `.unsupported` or every lock-screen
+    /// submission looks like an attack.
+    static func classifyAttestationError(_ error: Error) -> AttestationBuilder.HwAttestationStatus {
+        if case CDLError.hardwareAttestationUnsupported = error { return .unsupported }
+        if case CDLError.keychainError = error { return .unsupported }
+        return .failed
     }
 
     // MARK: - WebSocket

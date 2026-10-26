@@ -90,14 +90,31 @@ export async function completeSession(
 
     // 12. state
     const passed = att.liveness_decision === 'pass';
+    // Persist the downgrade-attack signal so later queries (per-device
+    // clustering, operator dashboards) can see which bucket a session
+    // ended up in. Null when the SDK pre-dates the field.
+    const hwStatus = att.hw_attestation_status ?? null;
     await updateSession(sessionId, {
       state: passed ? 'complete' : 'failed',
       liveness_decision: att.liveness_decision,
       assurance_level: att.assurance_level,
+      hw_attestation_status: hwStatus,
       attestation_hash: sha256hex(canonicalize(att)),
       jwt_hash: sha256base64url(token),
       jwt_issued_at: new Date().toISOString(),
     });
+    // Surface the status in the structured log so an operator grepping
+    // for `hw_attestation_status=failed` can find the clustering signal
+    // without having to decode the attestation hash back to the row.
+    log.info(
+      {
+        session_id: sessionId,
+        assurance_level: att.assurance_level,
+        hw_attestation_status: hwStatus,
+        liveness_decision: att.liveness_decision,
+      },
+      'session_complete',
+    );
 
     // 13. tell the browser and the phone
     if (passed) {
@@ -119,8 +136,16 @@ export async function completeSession(
     }
     toPhone(sessionId, { type: 'attestation_received', timestamp: now() });
 
-    // 14. webhook, not awaited so a slow receiver cannot hold the phone up
-    void callWebhook({ ...session, assurance_level: att.assurance_level }, token, att, hardware.attested, log);
+    // 14. webhook, not awaited so a slow receiver cannot hold the phone up.
+    // callWebhook reads hw_attestation_status off `att`, not `session`, so
+    // we don't need to patch the session field for the webhook body.
+    void callWebhook(
+      { ...session, assurance_level: att.assurance_level },
+      token,
+      att,
+      hardware.attested,
+      log,
+    );
 
     return { token, decision: att.liveness_decision };
   } catch (e) {

@@ -58,18 +58,49 @@ class AppAttestService {
         #endif
     }
 
-    /// Phase 2 — per-session assertion. Not yet wired into CDLSession;
-    /// kept visible so the orchestrator can plan around the API.
+    /// Builds the canonical client-data bytes App Attest will sign over.
+    /// Exposed (internal) so the relay-side verifier and the drift tests
+    /// can reproduce the exact preimage. Format: canonical JSON of a flat
+    /// four-field object (challenge_id, liveness_decision, nonce, session_id).
+    ///
+    /// Canonical JSON (not string concat) closes the "session_id=abc +
+    /// challenge_id=def" vs "session_id=abcde + challenge_id=f" ambiguity.
+    /// The nonce is a server-issued single-use string fetched from
+    /// /integrity-nonce; binding it into the signed preimage prevents an
+    /// assertion captured for one session from being replayed to another.
+    static func assertionClientData(
+        sessionId: String,
+        challengeId: String,
+        livenessDecision: String,
+        nonce: String
+    ) throws -> Data {
+        return try CanonicalJSON.encode([
+            "challenge_id": challengeId,
+            "liveness_decision": livenessDecision,
+            "nonce": nonce,
+            "session_id": sessionId,
+        ])
+    }
+
+    /// Per-session assertion. The signed client data is a canonical-JSON
+    /// object (see assertionClientData) so the server can replicate the
+    /// exact byte sequence without worrying about field-boundary parsing.
+    /// The nonce argument MUST come from a prior /integrity-nonce call for
+    /// this same session — the server fetch-and-deletes it on verification.
     func generateAssertion(
         sessionId: String,
         challengeId: String,
-        livenessDecision: String
+        livenessDecision: String,
+        nonce: String
     ) async throws -> String {
         #if canImport(DeviceCheck)
         let keyId = try KeychainService.retrieveKeyId()
-        guard let clientData = (sessionId + challengeId + livenessDecision).data(using: .utf8) else {
-            throw CDLError.networkError("assertion client data not UTF-8 encodable")
-        }
+        let clientData = try AppAttestService.assertionClientData(
+            sessionId: sessionId,
+            challengeId: challengeId,
+            livenessDecision: livenessDecision,
+            nonce: nonce
+        )
         let clientDataHash = Data(SHA256.hash(data: clientData))
         let assertion = try await generateAssertionWrapped(keyId: keyId, clientDataHash: clientDataHash)
         return assertion.base64EncodedString()

@@ -40,7 +40,24 @@ data class LivenessResult(
     val layerScores: LayerScores
 )
 
-class CDLException(message: String) : Exception(message)
+/**
+ * SDK-wide error type. The optional cause lets classifying wrappers
+ * (e.g. PlayIntegrityUnavailableException) chain the underlying Play
+ * Services / network exception for crash reports and triage.
+ */
+open class CDLException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/**
+ * Thrown by PlayIntegrityService when Play Integrity reports a code that
+ * means "this device cannot do hardware attestation at all" (missing Play
+ * Services, API not available, cannot bind to service, outdated Play Store)
+ * — distinct from codes that mean "device could, but the call failed".
+ * CDLSession catches this and maps to HwStatus.UNSUPPORTED so legitimate
+ * AOSP / Huawei / older Android devices don't light up the server's
+ * downgrade-attack heuristic that watches for the FAILED bucket.
+ */
+class PlayIntegrityUnavailableException(message: String, cause: Throwable? = null) :
+    CDLException(message, cause)
 
 private val moshi: Moshi by lazy {
     Moshi.Builder().add(KotlinJsonAdapterFactory()).build()

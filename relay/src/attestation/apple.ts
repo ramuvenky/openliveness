@@ -4,6 +4,7 @@ import { readFileSync } from 'fs';
 import { config } from '../config';
 import { CDLError } from '../errors';
 import { getRedis } from '../session/store';
+import { canonicalize } from '../utils/crypto';
 
 const YEAR = 365 * 24 * 3600;
 
@@ -245,7 +246,42 @@ export async function verifyAppAttestAssertion(
 
   const counter = authData.readUInt32BE(33);
 
-  const clientData = sessionId + challengeId + livenessDecision;
+  // M-2: peek at the Phase 2 integrity nonce; deletion happens only after
+  // signature and counter CAS both pass (see end of function). A legitimate
+  // submission whose signature fails (encoding bug, mid-flow key rotation)
+  // then keeps the nonce around so the real device can retry within the
+  // 5-minute TTL instead of hitting ERR_APPLE_ATTEST_INVALID on the retry.
+  //
+  // Replay protection stands on two upstream props even without immediate
+  // deletion: `claimChallenge` SETNX in complete.ts serializes same-session
+  // submissions to exactly one winner (so same-session replay can't reach
+  // here), and the nonce is baked into the signed preimage so a captured
+  // assertion cannot be redirected to any other session (cross-session
+  // replay fails signature verify). The DEL below is defense-in-depth for
+  // the case where a future refactor loosens one of those upstream gates.
+  //
+  // Absence here means the client either skipped the nonce handshake or
+  // the nonce TTL expired — both are ERR_APPLE_ATTEST_INVALID.
+  const nonceKey = `cdl:session:${sessionId}:integrity_nonce`;
+  const sessionNonce = await r.get(nonceKey);
+  if (!sessionNonce) {
+    throw new CDLError('ERR_APPLE_ATTEST_INVALID', 'missing or already-consumed integrity nonce');
+  }
+
+  // Canonical-JSON preimage. Must stay byte-identical to the iOS SDK's
+  // AppAttestService.assertionClientData — a drift test on each side pins
+  // the exact string. The field-boundary ambiguity of the old string concat
+  // (session_id="abc" + challenge_id="def" indistinguishable from
+  // session_id="ab" + challenge_id="cdef") is closed by this encoding.
+  const clientData = Buffer.from(
+    canonicalize({
+      challenge_id: challengeId,
+      liveness_decision: livenessDecision,
+      nonce: sessionNonce,
+      session_id: sessionId,
+    }),
+    'utf8',
+  );
   const clientDataHash = createHash('sha256').update(clientData).digest();
   // Apple signs SHA256(authData + clientDataHash), and ES256 hashes that once more.
   const nonce = createHash('sha256').update(Buffer.concat([authData, clientDataHash])).digest();
@@ -267,5 +303,10 @@ export async function verifyAppAttestAssertion(
     String(YEAR),
   )) as number;
   if (ok !== 1) throw new CDLError('ERR_APPLE_ATTEST_COUNTER');
+  // Only burn the nonce after both signature verify and counter CAS have
+  // succeeded. A stale-counter replay (same assertion submitted twice) now
+  // fails at the CAS without consuming the nonce, so a legitimate device
+  // whose first attempt raced a replay still has a nonce to work against.
+  await r.del(nonceKey);
   return true;
 }

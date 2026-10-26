@@ -30,21 +30,50 @@ object AttestationBuilder {
         session: CDLSession,
         layerScores: LayerScores,
         ambient: AmbientConditions,
-        deviceAttestation: String? = null
+        deviceAttestation: String? = null,
+        /**
+         * Pre-computed decision. Callers that also sign client data (iOS App
+         * Attest, future Android remote attestation) MUST pass the same string
+         * they fed into the device-signed payload — otherwise the posted
+         * attestation and the device assertion disagree on a load-bearing
+         * field. Default back to the stub rule for callers that don't care.
+         */
+        livenessDecision: String = livenessDecision(layerScores),
+        /**
+         * How hardware attestation ended. `null` is accepted for callers
+         * that pre-date the field; defaults to `UNSUPPORTED` so a missing
+         * `deviceAttestation` is tagged correctly. The relay reads this to
+         * tell "no Play Services" (expected) apart from "Play Integrity
+         * threw" (potential downgrade attack).
+         */
+        hwAttestationStatus: CDLSession.HwStatus? = null,
     ): ByteArray {
 
         // TODO(layer2): `challenge_response` currently echoes the challenge
         // sequence that the relay already issued, which is trivially replayable.
         // Replace with the user-observed response captured by Layer2 before
         // treating attestation submission as evidence of a live challenge.
+        val effectiveHwStatus = hwAttestationStatus
+            ?: if (deviceAttestation == null) CDLSession.HwStatus.UNSUPPORTED else CDLSession.HwStatus.OK
+        // M-1: derive assurance_level from BOTH signals. An inconsistent pair
+        // (token present + status != OK, or token absent + status == OK)
+        // defaults to software_only rather than a lying IAL2 claim. The real
+        // CDLSession.start path pairs these consistently via
+        // requestDeviceAttestation; this is defense for direct callers of
+        // AttestationBuilder.build so the SDK cannot emit something the
+        // relay's checkAssurance would reject.
+        val assuranceLevel =
+            if (deviceAttestation != null && effectiveHwStatus == CDLSession.HwStatus.OK) "IAL2"
+            else "software_only"
         val attestation = linkedMapOf<String, Any?>(
             "version" to "1.0",
             "session_id" to session.payload.session_id,
             "challenge_id" to session.payload.challenge_id,
             "challenge_response" to session.payload.challenge_sequence.joinToString(","),
             "timestamp" to iso8601Now(),
-            "liveness_decision" to decision(layerScores),
-            "assurance_level" to if (deviceAttestation == null) "software_only" else "IAL2",
+            "liveness_decision" to livenessDecision,
+            "assurance_level" to assuranceLevel,
+            "hw_attestation_status" to effectiveHwStatus.wire,
             "layer_scores" to mapOf(
                 "layer2_challenge_completed" to layerScores.layer2ChallengeCompleted,
                 "layer2_challenge_score" to layerScores.layer2ChallengeScore.toDouble(),
@@ -90,7 +119,13 @@ object AttestationBuilder {
         layer5MicrosaccadeDetected = true
     )
 
-    private fun decision(layerScores: LayerScores): String =
+    /**
+     * Public so CDLSession can hash the same decision string into the signed
+     * payload the device attestation covers, keeping the posted attestation
+     * and the device-signed client data in agreement. Changes here are
+     * part of the attestation wire contract — review carefully.
+     */
+    fun livenessDecision(layerScores: LayerScores): String =
         if (!layerScores.layer2ChallengeCompleted) "fail" else "pass"
 
     private fun iso8601Now(): String =

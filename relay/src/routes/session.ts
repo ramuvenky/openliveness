@@ -62,6 +62,7 @@ export async function sessionRoutes(app: FastifyInstance) {
       phone_token: phoneToken,
       liveness_decision: null,
       assurance_level: null,
+      hw_attestation_status: null,
       attestation_hash: null,
       jwt_hash: null,
       jwt_issued_at: null,
@@ -167,7 +168,10 @@ export async function sessionRoutes(app: FastifyInstance) {
     },
   );
 
-  // Android only. See google.ts for why the liveness decision is not part of the nonce.
+  // Both platforms. Android feeds the nonce into the Play Integrity token;
+  // iOS folds it into the canonical-JSON client data the App Attest assertion
+  // signs over. See google.ts for why the liveness decision is not part of
+  // the nonce (phone requests it before liveness runs).
   app.post<{ Params: { id: string } }>(
     '/cdl/session/:id/integrity-nonce',
     { config: limit(LIMITS.integrity) },

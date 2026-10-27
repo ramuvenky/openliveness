@@ -22,12 +22,6 @@ options:
   # XCArchive / scheme actions stay stable regardless of where the
   # developer runs xcodegen from.
   generateEmptyDirectories: true
-  # Pin to Xcode 15's project file format. Recent XcodeGen releases
-  # (≥ 2.42) default to objectVersion 77, which only Xcode 16+ can read
-  # — CI's `sudo xcode-select -s /Applications/Xcode_15.4.app` would then
-  # fail with "future Xcode project file format (77)". 56 is the Xcode 15
-  # format; bump this when CI moves to a macos-15 runner with Xcode 16.
-  objectVersion: 56
 
 settings:
   base:

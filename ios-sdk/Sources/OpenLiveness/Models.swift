@@ -29,7 +29,19 @@ public struct AmbientConditions {
     public var motionDetected: Bool = false
     public var frontCameraConfirmed: Bool = true
 
-    public init() {}
+    // Memberwise-style public init with all-defaulted args. Swift
+    // auto-generates a memberwise init only when a struct declares no
+    // explicit init, so this is the single init both `AmbientConditions()`
+    // and `AmbientConditions(lowLightDetected: true, ...)` resolve to.
+    public init(
+        lowLightDetected: Bool = false,
+        motionDetected: Bool = false,
+        frontCameraConfirmed: Bool = true
+    ) {
+        self.lowLightDetected = lowLightDetected
+        self.motionDetected = motionDetected
+        self.frontCameraConfirmed = frontCameraConfirmed
+    }
 }
 
 public struct LivenessResult {

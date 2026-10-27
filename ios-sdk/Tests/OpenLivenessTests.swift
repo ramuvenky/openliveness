@@ -802,14 +802,29 @@ final class OpenLivenessTests: XCTestCase {
     //      default-arg path from outside the SDK module — the exact
     //      shape that broke under xcodebuild on CI.
     func testDefaultAllowStubModeIsReferenceableFromExternalModule() {
-        // Package.swift doesn't define OPENLIVENESS_STUB_ALLOWED, so the
-        // `#else` branch wins and the default must resolve to `false`.
-        // Flipping this on by default would silently route Phase-1 stub
-        // scores into every session that forgets to opt in.
+        // Package.swift gates OPENLIVENESS_STUB_ALLOWED on `.debug` only (see
+        // swiftSettings), so the default tracks the SDK's build config: Debug
+        // → true (dev harness gets a working stub path), Release → false
+        // (prod integrators who forget to inject a landmark stream fail loud).
+        // The behavioural fork lives in StubModeDefaultTests; the point of
+        // *this* test is purely the compile-shape check that the symbol is
+        // reachable from an external module via the public default-arg path.
+        //
+        // We fork on `#if DEBUG` because the test target doesn't itself
+        // define OPENLIVENESS_STUB_ALLOWED — but under xcodebuild both the
+        // SDK target's `.when(configuration: .debug)` and the test target's
+        // DEBUG move together, so DEBUG is a valid proxy here.
+        #if DEBUG
+        XCTAssertTrue(
+            CDLSession.defaultAllowStubMode,
+            "Debug SDK build sets OPENLIVENESS_STUB_ALLOWED — default must be true"
+        )
+        #else
         XCTAssertFalse(
             CDLSession.defaultAllowStubMode,
-            "defaultAllowStubMode must be false unless OPENLIVENESS_STUB_ALLOWED is set at SDK build time"
+            "Release SDK build must NOT set OPENLIVENESS_STUB_ALLOWED — default must be false"
         )
+        #endif
     }
 
     func testPublicInitCompilesWithoutExplicitAllowStubMode() {

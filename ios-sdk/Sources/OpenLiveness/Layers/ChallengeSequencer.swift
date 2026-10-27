@@ -165,7 +165,12 @@ public final class ChallengeSequencer {
             return nil
         }
         if startTime == nil { startTime = timestamp }
-        let elapsed = max(0, timestamp - (startTime ?? timestamp))
+        let raw = timestamp - (startTime ?? timestamp)
+        // Swift's `max(0, .nan)` returns 0 (loses NaN), unlike Kotlin's
+        // `kotlin.math.max` which propagates NaN. Preserve non-finite
+        // values here so the isFinite guard below catches them — this is
+        // what makes R-NEW-1 fire on the first NaN/Infinity frame.
+        let elapsed = raw.isFinite ? max(0, raw) : raw
 
         if !elapsed.isFinite || elapsed > ChallengeSequencer.totalTimeoutSeconds {
             let result = ChallengeResult(

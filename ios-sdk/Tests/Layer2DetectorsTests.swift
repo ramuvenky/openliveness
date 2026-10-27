@@ -183,7 +183,7 @@ final class Layer2DetectorsTests: XCTestCase {
     // Previous behavior would have averaged 0.0 into the mean, dragging
     // the trigger (neutral * 1.2) toward 0 and firing on any normal
     // mouth motion — a false-pass path we want to lock closed.
-    func testSmileDetectorSkipsZeroWidthCalibrationSamples() {
+    func testSmileDetectorSkipsZeroWidthCalibrationSamples() throws {
         let d = SmileDetector()
         // 5 real neutral frames + 5 face-lost frames: calibration still
         // needs 5 more real frames before fire path is live, and the
@@ -197,7 +197,12 @@ final class Layer2DetectorsTests: XCTestCase {
         // neutralMouthWidth is still nil (only 5 real samples, need 10).
         XCTAssertNil(d.neutralMouthWidth)
         for _ in 0..<5 { _ = d.update(lm(neutralFace())) }
-        XCTAssertEqual(d.neutralMouthWidth, 0.20, accuracy: 1e-6)
+        // Unwrap because `neutralMouthWidth` is Float? and the
+        // XCTAssertEqual(_:_:accuracy:) overload needs non-optional
+        // FloatingPoint — mirror the pattern used at the top of this
+        // file (testSmileDetectorRequiresCalibrationThenFires).
+        let neutral = try XCTUnwrap(d.neutralMouthWidth)
+        XCTAssertEqual(neutral, 0.20, accuracy: 1e-6)
     }
 
     func testSmileDetectorDoesNotFireBelowThreshold() {

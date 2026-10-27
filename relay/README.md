@@ -37,6 +37,22 @@ testing only. It defaults to `enforce` when `NODE_ENV=production`.
 For App Attest in enforce mode, put Apple's App Attest root CA PEM at
 `APPLE_APP_ATTEST_ROOT_CA_PATH`. For Play Integrity set `GOOGLE_APPLICATION_CREDENTIALS`.
 
+### `STUB_MODE_RP_ALLOWLIST` — **non-production builds only**
+
+Mobile SDKs stamp a top-level `stub_mode: true` on the attestation whenever
+their liveness path fell back to the Phase-1 hardcoded layer scores (no real
+landmark stream). The relay refuses `stub_mode: true` from any `relying_party`
+not in this comma-separated allowlist and returns HTTP 403
+`ERR_STUB_MODE_FORBIDDEN`.
+
+**Leave this empty in production.** Populating it in a real deployment is the
+only way a hostile fork that flips the SDK's `allowStubMode` flag can ship an
+"always passes" attestation past the server. Use it exclusively for CI /
+integration relying_party values, and audit the list on every release — every
+RP you add is one that can submit synthetic liveness. Every `stub_mode: true`
+arrival is logged with `event=stub_mode_submitted` and `allowed=true|false`,
+regardless of whether the policy accepts or rejects it.
+
 ## Tests
 
 ```bash

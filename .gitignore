@@ -7,3 +7,19 @@ keys/
 *.google-service-account.json
 .turbo/
 examples/**/public/app.js
+
+# OS / editor cruft
+.DS_Store
+*.swp
+
+# Tool-local state (none of this should ever reach VCS)
+.claude/
+.venv/
+
+# Android / Gradle build output. local.properties contains absolute SDK
+# paths that leak the dev's $HOME; .gradle/ and build/ are regenerable
+# per-machine. Keep these ignored at every nesting level since the repo
+# has multiple Android modules (android-sdk, android-sample).
+**/.gradle/
+**/build/
+**/local.properties

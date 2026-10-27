@@ -707,11 +707,245 @@ final class OpenLivenessTests: XCTestCase {
         }
     }
 
-    func testLivenessDecisionReflectsLayer2Completion() {
+    // S-NEW-2(c) — the on-wire `stub_mode` marker. Defaults to false so a
+    // caller that forgets to stamp it doesn't accidentally pass as "stub"
+    // on the server. The CDLSession.start path flips this to true when
+    // the Phase-1 stub liveness ran (challengeResult == nil); the server
+    // enforces policy on this field, so a regression that stops emitting
+    // it (or hardcodes false) would silently let the stub path reach
+    // production.
+    func testAttestationBuilderStampsStubModeFalseByDefault() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions()
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""stub_mode":false"#),
+                      "default stub_mode must be false — opt-in only, never on by default")
+    }
+
+    func testAttestationBuilderStampsStubModeTrueWhenCallerSetsIt() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            stubMode: true
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""stub_mode":true"#),
+                      "stub_mode must be true on the wire when the SDK ran the stub path")
+    }
+
+    // S-NEW-1(b) — production builds must reject the stub-liveness path.
+    // A CDLSession constructed without a landmarkStream and with
+    // allowStubMode=false must throw CDLError.stubModeDisallowed when
+    // runLiveness runs. Invoked directly (not via start()) because iOS
+    // doesn't have a WebSocket mock harness yet; the Android sibling
+    // uses MockWebServer to exercise the same gate at start()-time.
+    func testRunLivenessThrowsWhenStubModeDisallowedAndNoLandmarkStream() async {
+        let session = CDLSession(
+            from: makeStubPayload(),
+            landmarkStream: nil,
+            allowStubMode: false
+        )
+        do {
+            _ = try await session._testOnly_runLiveness(ambient: AmbientConditions())
+            XCTFail("expected CDLError.stubModeDisallowed")
+        } catch CDLError.stubModeDisallowed {
+            // ok
+        } catch {
+            XCTFail("unexpected error type: \(error)")
+        }
+    }
+
+    func testRunLivenessUsesStubWhenStubModeAllowedAndNoLandmarkStream() async throws {
+        let session = CDLSession(
+            from: makeStubPayload(),
+            landmarkStream: nil,
+            allowStubMode: true
+        )
+        let (scores, result) = try await session._testOnly_runLiveness(ambient: AmbientConditions())
+        // Stub path signature: scores match stubLayerScores() and the
+        // nil result is what tells build() to stamp stub_mode=true.
+        XCTAssertNil(result, "stub path must produce nil ChallengeResult")
+        XCTAssertTrue(scores.layer2ChallengeCompleted)
+    }
+
+    // C-1 — assurance_level must downgrade to software_only when the
+    // orchestrator decided `fail` or `inconclusive`, even if hw
+    // attestation succeeded. Before the fix the builder emitted "IAL2"
+    // off (deviceAttestation != nil && hwOk) alone — i.e. an attestation
+    // claiming the strongest assurance level while the SDK's own
+    // liveness decision was `fail`. Belt-and-suspenders at the SDK layer
+    // so direct callers can't emit the self-contradicting attestation.
+    func testAssuranceLevelDowngradesToSoftwareOnlyWhenDecisionFailEvenIfHwOk() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: "stub-token",
+            livenessDecision: "fail",
+            hwAttestationStatus: .ok
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""liveness_decision":"fail""#))
+        XCTAssertTrue(str.contains(#""assurance_level":"software_only""#))
+        XCTAssertTrue(str.contains(#""hw_attestation_status":"ok""#))
+    }
+
+    func testAssuranceLevelDowngradesToSoftwareOnlyWhenDecisionInconclusiveEvenIfHwOk() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            deviceAttestation: "stub-token",
+            livenessDecision: "inconclusive",
+            hwAttestationStatus: .ok
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""assurance_level":"software_only""#))
+    }
+
+    // H-1 — a caller that has a real `challengeResult` MUST also pass an
+    // explicit `livenessDecision`. The old default routed through
+    // `stubLivenessDecision` which only inspects layer 2; a catastrophic
+    // layer-3/4/5 score would silently become "pass" on the wire.
+    func testBuilderThrowsWhenChallengeResultProvidedWithoutLivenessDecision() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+        let result = ChallengeResult(
+            completed: true,
+            score: 1.0,
+            elapsedSeconds: 0.1,
+            stepsCompleted: 1,
+            totalSteps: 1,
+            firedSteps: [.blink]
+        )
+        XCTAssertThrowsError(
+            try AttestationBuilder.build(
+                session: session,
+                layerScores: AttestationBuilder.stubLayerScores(),
+                ambient: AmbientConditions(),
+                challengeResult: result
+                // livenessDecision deliberately omitted
+            )
+        ) { err in
+            XCTAssertEqual(
+                err as? AttestationBuilder.BuildError,
+                .missingLivenessDecisionForRealChallengeResult
+            )
+        }
+    }
+
+    // M-3 — challenge_response reflects what the SDK actually detected
+    // (`firedSteps`), not just what the server prompted
+    // (`session.challengeSequence`). On completed==true these are equal
+    // by construction. The on-wire test fixes `firedSteps` to a known
+    // order and asserts the comma-join matches.
+    func testChallengeResponseIsFiredStepsWireJoinedWhenChallengeResultIsComplete() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+        let result = ChallengeResult(
+            completed: true,
+            score: 1.0,
+            elapsedSeconds: 0.1,
+            stepsCompleted: 3,
+            totalSteps: 3,
+            firedSteps: [.blink, .lookLeft, .smile]
+        )
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            livenessDecision: "pass",
+            challengeResult: result
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""challenge_response":"blink,look_left,smile""#),
+                      "challenge_response must be firedSteps wire-joined, got: \(str)")
+    }
+
+    // M-3 — timed-out run still sends empty string so relay's
+    // checkChallenge rejects the half-done result (unchanged from
+    // pre-fix). Keeping this test wires in the new field surface.
+    func testChallengeResponseIsEmptyStringOnTimedOutRunEvenWithPartialFiredSteps() throws {
+        guard keychainIsAvailable() else {
+            throw XCTSkip("Keychain unavailable in this test environment")
+        }
+        SigningService.KeyStore._clearPersistedKeyForTesting()
+        let session = CDLSession(from: makeStubPayload())
+        let result = ChallengeResult(
+            completed: false,
+            score: 0.0,
+            elapsedSeconds: 8.1,
+            stepsCompleted: 1,
+            totalSteps: 3,
+            firedSteps: [.blink]
+        )
+        let bytes = try AttestationBuilder.build(
+            session: session,
+            layerScores: AttestationBuilder.stubLayerScores(),
+            ambient: AmbientConditions(),
+            livenessDecision: "fail",
+            challengeResult: result
+        )
+        let str = String(data: bytes, encoding: .utf8) ?? ""
+        XCTAssertTrue(str.contains(#""challenge_response":"""#))
+    }
+
+    func testStubLivenessDecisionReflectsLayer2Completion() {
         var scores = AttestationBuilder.stubLayerScores()
-        XCTAssertEqual(AttestationBuilder.livenessDecision(layerScores: scores), "pass")
+        XCTAssertEqual(AttestationBuilder.stubLivenessDecision(layerScores: scores), "pass")
         scores.layer2ChallengeCompleted = false
-        XCTAssertEqual(AttestationBuilder.livenessDecision(layerScores: scores), "fail")
+        XCTAssertEqual(AttestationBuilder.stubLivenessDecision(layerScores: scores), "fail")
+    }
+
+    // S-1 drift guard — the stub layer scores MUST compose with the real
+    // LivenessOrchestrator to produce `.pass` (not inconclusive/fail). If
+    // a future tuning of weights or thresholds breaks that, the Phase-1
+    // e2e relay tests that still take the stub path would start failing
+    // with the diagnostic buried in the server response. Locking this
+    // here catches the drift at iOS-SDK unit-test time, where the fix
+    // (bump the stub scores OR adjust the orchestrator) is obvious.
+    func testStubLayerScoresComposeWithOrchestratorToPass() {
+        let stub = AttestationBuilder.stubLayerScores()
+        let outcome = LivenessOrchestrator().orchestrate(
+            layerScores: stub,
+            ambientConditions: AmbientConditions()
+        )
+        XCTAssertEqual(outcome.decision, "pass",
+            "stub scores drifted below pass threshold — stub e2e path would start failing")
     }
 
     func testAttestationBuilderDeviceIdHashIsStableAcrossBuilds() throws {

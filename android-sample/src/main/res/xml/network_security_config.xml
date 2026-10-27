@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEV HARNESS ONLY. Permits cleartext http:// / ws:// so a developer can
+  point the sample at any LAN relay without hand-editing this file. This
+  is appropriate here because android-sample is NOT a shippable app —
+  there is no release variant and it's never published. The openliveness
+  SDK itself does not relax cleartext policy; integrators who embed the
+  SDK in their own app ship their own network_security_config.
+
+  Android's XML security config does not support CIDR ranges, so there is
+  no clean way to allow "any RFC 1918 LAN host" without listing every /24.
+  base-config cleartextTrafficPermitted=true is the standard dev-tooling
+  pattern (see androidx test fixtures, Firebase emulator docs). The
+  trade-off: a dev build can be MITM'd on an untrusted network. Accept
+  this cost for the sample harness; do not copy this pattern into any
+  production app.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -11,6 +11,11 @@ const STATUS: Record<string, number> = {
   ERR_ATTESTATION_TOKEN_UNAVAILABLE: 410,
   ERR_RATE_LIMITED: 429,
   ERR_RELAY_UNAVAILABLE: 503,
+  // Server-side policy refusal: the submitter is authenticated and the
+  // request is well-formed, but the relying_party is not on the stub-mode
+  // allowlist. 403 (not 400) so an operator reading the HTTP log can tell
+  // "RP forbidden from this operation" from "client sent garbage."
+  ERR_STUB_MODE_FORBIDDEN: 403,
   ERR_INTERNAL: 500,
 };
 

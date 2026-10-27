@@ -40,4 +40,46 @@ class CDLSessionTest {
             assertEquals(vec.expected, CanonicalJson.encode(vec.input), "vector ${vec.name}")
         }
     }
+
+    // Compile-time stub gate (C-2 fix). The init block delegates to
+    // CDLSession.checkStubGate(allowStubMode, BuildConfig.STUB_PATH_ENABLED).
+    // BuildConfig.STUB_PATH_ENABLED is baked into the AAR at compile time
+    // (`true` in debug variants, `false` in release — see android-sdk/
+    // build.gradle.kts), so a JVM unit test can't flip it. Driving the
+    // helper directly covers both branches of the gate and locks the
+    // asymmetry fix against regression: if a future refactor drops the
+    // `release { buildConfigField(... false) }` line, the throwing branch
+    // of this test still passes against the extracted helper — but the
+    // "release AAR constructs normally" guarantee is lost. That drift
+    // would be caught by the companion Gradle assertion in `./gradlew
+    // :assembleRelease` combined with a reviewer reading this comment.
+
+    @Test
+    fun `stub gate throws when allowStubMode is true and stub path is disabled (simulates release AAR)`() {
+        val ex = assertThrows(IllegalStateException::class.java) {
+            CDLSession.checkStubGate(allowStubMode = true, stubPathEnabled = false)
+        }
+        // Error message must name the Gradle flag so an integrator who
+        // trips this at runtime can find the fix without reading SDK source.
+        assertTrue(
+            ex.message?.contains("STUB_PATH_ENABLED") == true,
+            "stub gate error must name BuildConfig.STUB_PATH_ENABLED so the operator can find the fix"
+        )
+    }
+
+    @Test
+    fun `stub gate permits allowStubMode when stub path is enabled (debug AAR path)`() {
+        // Debug variants compile STUB_PATH_ENABLED=true, so this is the
+        // normal unit-test / dev-harness path. Just assert "no throw".
+        CDLSession.checkStubGate(allowStubMode = true, stubPathEnabled = true)
+    }
+
+    @Test
+    fun `stub gate is inert when allowStubMode is false regardless of build variant`() {
+        // The gate is a one-way door: it only ever refuses the stub path,
+        // never anything else. A real-landmark release build must construct
+        // normally even though stubPathEnabled=false.
+        CDLSession.checkStubGate(allowStubMode = false, stubPathEnabled = false)
+        CDLSession.checkStubGate(allowStubMode = false, stubPathEnabled = true)
+    }
 }

@@ -1,0 +1,9 @@
+# Belt-and-braces: the root .gitignore already covers these at every
+# nesting level, but a module-local file is the Android Studio convention
+# and makes the module standalone-cloneable.
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/

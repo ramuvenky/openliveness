@@ -53,6 +53,35 @@ export async function completeSession(
   }
 
   try {
+    // 3a. stub_mode policy. The mobile SDKs stamp `stub_mode: true` on the
+    // attestation root when their liveness path fell back to the Phase-1
+    // hardcoded layer scores (no real landmark stream). A hostile fork that
+    // flips the SDK's `allowStubMode` flag could ship an "always passes"
+    // build, so the server MUST refuse `stub_mode: true` from any RP that
+    // isn't explicitly allowlisted. We log every stub_mode:true arrival on
+    // both the accept and the reject branch — the metric is as valuable as
+    // the rejection, since a sudden rise in allowlisted stub traffic is
+    // itself a signal (misconfiguration, CI runaway, allowlist drift).
+    //
+    // Positioned after session-state checks (so expired / wrong-state
+    // sessions return their native error, not a policy error that leaks
+    // state existence) but BEFORE challenge / signature / hardware
+    // verification — a policy refusal is cheap and doesn't deserve to
+    // burn the challenge or do an ECDSA verify.
+    if (att.stub_mode === true) {
+      const allowed = config().stubModeRpAllowlist.includes(session.relying_party);
+      log.warn(
+        {
+          event: 'stub_mode_submitted',
+          session_id: sessionId,
+          relying_party: session.relying_party,
+          allowed,
+        },
+        'stub_mode_submitted',
+      );
+      if (!allowed) throw new CDLError('ERR_STUB_MODE_FORBIDDEN');
+    }
+
     // 4 and 5. challenge binding
     if (await isChallengeUsed(att.challenge_id)) throw new CDLError('ERR_CHALLENGE_REUSED');
     checkChallenge(att, session);

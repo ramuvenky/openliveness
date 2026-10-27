@@ -3,6 +3,13 @@ plugins {
     kotlin("android") version "1.9.0"
 }
 
+// Published coordinate so a sibling Gradle project (android-sample) can
+// pull this in via `includeBuild("../android-sdk")` + a normal Maven
+// `implementation(...)` line. The composite-build dependency-substitution
+// rule matches on group + rootProject.name.
+group = "dev.openliveness"
+version = "0.1"
+
 android {
     namespace = "dev.openliveness"
     compileSdk = 34
@@ -17,6 +24,29 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+    }
+    // BuildConfig.STUB_PATH_ENABLED is the compile-time half of the
+    // stub_mode defense. It mirrors the iOS OPENLIVENESS_STUB_ALLOWED
+    // SwiftPM flag: debug variants of the SDK (and any app depending on
+    // this library's debug flavour) can take the stub liveness path;
+    // release variants cannot. CDLSession enforces this at construction
+    // time so a hostile fork that flips `allowStubMode = true` in source
+    // still can't ship a release AAR that silently always passes
+    // liveness. The server-side STUB_MODE_RP_ALLOWLIST is the second
+    // layer of defense for the Android case (iOS doesn't need it because
+    // its gate is physically compiled out — Android's constructor arg
+    // is runtime, so this check + the server policy together close the
+    // asymmetry).
+    buildFeatures {
+        buildConfig = true
+    }
+    buildTypes {
+        getByName("debug") {
+            buildConfigField("boolean", "STUB_PATH_ENABLED", "true")
+        }
+        getByName("release") {
+            buildConfigField("boolean", "STUB_PATH_ENABLED", "false")
+        }
     }
     // Phase 2 drift tests touch AttestationBuilder which calls
     // Settings.Secure.getString(). In JVM unit tests android.* methods

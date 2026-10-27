@@ -8,10 +8,20 @@ services:
       - REDIS_URL=redis://redis:6379
       - JWT_PRIVATE_KEY_PATH=/keys/relay-private.pem
       - JWT_PUBLIC_KEY_PATH=/keys/relay-public.pem
-      - RELAY_BASE_URL=localhost
-      - NODE_ENV=development
-      - HARDWARE_ATTESTATION=stub
-      - INTEGRITY_NONCE_SECRET=dev-secret-change-in-production
+      # LAN IP for cross-device testing (phone → Mac over Wi-Fi) belongs
+      # in a developer-local .env file, NOT this compose file. Default to
+      # localhost so the committed template is safe to run anywhere and
+      # a stale IP from one laptop can't follow the repo to another.
+      - RELAY_BASE_URL=${RELAY_BASE_URL:-localhost}
+      - NODE_ENV=${NODE_ENV:-development}
+      - HARDWARE_ATTESTATION=${HARDWARE_ATTESTATION:-stub}
+      # Required: boot refuses an empty secret or the well-known
+      # placeholder in production, so this must come from .env or shell
+      # env. Compose fails fast with a readable error if it's missing.
+      - INTEGRITY_NONCE_SECRET=${INTEGRITY_NONCE_SECRET:?INTEGRITY_NONCE_SECRET must be set — copy .env.example to .env, then openssl rand -hex 32}
+      # Allowlist of relying_party values permitted to submit stub_mode:true
+      # attestations. Empty in production. Operator sets via .env for CI RPs.
+      - STUB_MODE_RP_ALLOWLIST=${STUB_MODE_RP_ALLOWLIST:-}
     volumes:
       - ./keys:/keys:ro
     depends_on:

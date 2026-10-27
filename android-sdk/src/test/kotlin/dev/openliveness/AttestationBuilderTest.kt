@@ -3,6 +3,8 @@ package dev.openliveness
 import android.content.Context
 import dev.openliveness.attestation.AttestationBuilder
 import dev.openliveness.attestation.SigningService
+import dev.openliveness.layers.Challenge
+import dev.openliveness.layers.ChallengeResult
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -141,11 +144,26 @@ class AttestationBuilderTest {
     // leave the device-signed assertion and the posted attestation
     // disagreeing on the same input.
     @Test
-    fun `livenessDecision returns pass or fail based on layer2 completion`() {
+    fun `stubLivenessDecision returns pass or fail based on layer2 completion`() {
         val scores = AttestationBuilder.stubLayerScores()
-        assertEquals("pass", AttestationBuilder.livenessDecision(scores))
+        assertEquals("pass", AttestationBuilder.stubLivenessDecision(scores))
         scores.layer2ChallengeCompleted = false
-        assertEquals("fail", AttestationBuilder.livenessDecision(scores))
+        assertEquals("fail", AttestationBuilder.stubLivenessDecision(scores))
+    }
+
+    // S-1 drift guard — the stub layer scores MUST compose with the real
+    // LivenessOrchestrator to produce "pass" (not inconclusive/fail). If a
+    // future tuning of weights or thresholds breaks that, the Phase-1 e2e
+    // relay tests that still take the stub path would start failing with
+    // the diagnostic buried in the server response. Locking this here
+    // catches the drift at Android-SDK unit-test time, where the fix
+    // (bump the stub scores OR adjust the orchestrator) is obvious.
+    @Test
+    fun `stub layer scores compose with real orchestrator to decision=pass`() {
+        val stub = AttestationBuilder.stubLayerScores()
+        val outcome = LivenessOrchestrator().orchestrate(stub, AmbientConditions())
+        assertEquals("pass", outcome.decision,
+            "stub scores drifted below pass threshold — stub e2e path would start failing")
     }
 
     // Mirror of iOS testAttestationBuilderReturnsCanonicalBytes: the first
@@ -217,6 +235,173 @@ class AttestationBuilderTest {
         // kicks in on assurance_level. Preserving the raw status keeps the
         // caller-reported value visible on the wire for triage.
         assertEquals("ok", obj.getString("hw_attestation_status"))
+    }
+
+    // S-NEW-2 (c) — the on-wire stub_mode marker. Defaults to false so a
+    // caller that forgets to stamp it doesn't accidentally pass as "stub"
+    // on the server. The CDLSession.start path flips this to true when
+    // the Phase-1 stub liveness ran (challengeResult == null); the server
+    // enforces policy on this field, so a regression that stops emitting
+    // it (or hardcodes false) would silently let the stub path reach
+    // production.
+    @Test
+    fun `builder stamps stub_mode=false by default`() {
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = stubSession(),
+            layerScores = AttestationBuilder.stubLayerScores(),
+            ambient = AmbientConditions(),
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertTrue(obj.has("stub_mode"), "stub_mode field must be present on every attestation")
+        assertFalse(obj.getBoolean("stub_mode"),
+            "default stub_mode must be false — opt-in only, never on by default")
+    }
+
+    @Test
+    fun `builder stamps stub_mode=true when caller sets it`() {
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = stubSession(),
+            layerScores = AttestationBuilder.stubLayerScores(),
+            ambient = AmbientConditions(),
+            stubMode = true,
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertTrue(obj.getBoolean("stub_mode"),
+            "stub_mode must be true on the wire when the SDK ran the stub path")
+    }
+
+    // C-1 — assurance_level must downgrade to software_only when the
+    // orchestrator decided `fail` or `inconclusive`, even if hw
+    // attestation succeeded. Before the fix the builder emitted "IAL2"
+    // off (deviceAttestation != null && hwOk) alone — i.e. an attestation
+    // claiming the strongest assurance level while the SDK's own
+    // liveness decision was `fail`. The relay's checkAssurance also
+    // rejects that pair, but we belt-and-suspenders at the SDK layer
+    // so direct callers can't emit the self-contradicting attestation.
+    @Test
+    fun `assurance_level downgrades to software_only when livenessDecision is fail even if hw ok`() {
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = stubSession(),
+            layerScores = AttestationBuilder.stubLayerScores(),
+            ambient = AmbientConditions(),
+            deviceAttestation = "stub-token",
+            livenessDecision = "fail",
+            hwAttestationStatus = CDLSession.HwStatus.OK,
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertEquals("fail", obj.getString("liveness_decision"))
+        assertEquals("software_only", obj.getString("assurance_level"))
+        assertEquals("ok", obj.getString("hw_attestation_status"))
+    }
+
+    @Test
+    fun `assurance_level downgrades to software_only when livenessDecision is inconclusive even if hw ok`() {
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = stubSession(),
+            layerScores = AttestationBuilder.stubLayerScores(),
+            ambient = AmbientConditions(),
+            deviceAttestation = "stub-token",
+            livenessDecision = "inconclusive",
+            hwAttestationStatus = CDLSession.HwStatus.OK,
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertEquals("software_only", obj.getString("assurance_level"))
+    }
+
+    // H-1 — a caller that has a real `challengeResult` MUST also pass an
+    // explicit `livenessDecision`. The old default routed through
+    // `stubLivenessDecision` which only inspects layer 2; a catastrophic
+    // layer-3/4/5 score would silently become "pass" on the wire.
+    @Test
+    fun `builder throws when challengeResult is provided without livenessDecision`() {
+        val result = ChallengeResult(
+            completed = true,
+            score = 1.0f,
+            elapsedSeconds = 0.1,
+            stepsCompleted = 1,
+            totalSteps = 1,
+            firedSteps = listOf(Challenge.BLINK)
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            AttestationBuilder.build(
+                context = context,
+                session = stubSession(),
+                layerScores = AttestationBuilder.stubLayerScores(),
+                ambient = AmbientConditions(),
+                challengeResult = result,
+                // livenessDecision deliberately omitted
+            )
+        }
+    }
+
+    // H-1 pair — null challengeResult + null livenessDecision keeps the
+    // Phase-1 stub path alive (e2e CI still routes through this).
+    @Test
+    fun `builder falls back to stub decision when both challengeResult and livenessDecision are null`() {
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = stubSession(),
+            layerScores = AttestationBuilder.stubLayerScores(),
+            ambient = AmbientConditions(),
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertEquals("pass", obj.getString("liveness_decision"))
+    }
+
+    // M-3 — challenge_response reflects what the SDK actually detected
+    // (`firedSteps`), not just what the server prompted
+    // (`session.challenge_sequence`). On completed==true these are equal
+    // by construction. The on-wire test fixes `firedSteps` to a known
+    // order and asserts the comma-join matches.
+    @Test
+    fun `challenge_response is firedSteps wire-joined when challengeResult is complete`() {
+        val result = ChallengeResult(
+            completed = true,
+            score = 1.0f,
+            elapsedSeconds = 0.1,
+            stepsCompleted = 3,
+            totalSteps = 3,
+            firedSteps = listOf(Challenge.BLINK, Challenge.LOOK_LEFT, Challenge.SMILE)
+        )
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = stubSession(),
+            layerScores = AttestationBuilder.stubLayerScores(),
+            ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = result,
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertEquals("blink,look_left,smile", obj.getString("challenge_response"))
+    }
+
+    // M-3 — timed-out run still sends empty string so relay's
+    // checkChallenge rejects the half-done result (unchanged from
+    // pre-fix). Keeping this test wires in the new field surface.
+    @Test
+    fun `challenge_response is empty string on timed-out run even with partial firedSteps`() {
+        val result = ChallengeResult(
+            completed = false,
+            score = 0.0f,
+            elapsedSeconds = 8.1,
+            stepsCompleted = 1,
+            totalSteps = 3,
+            firedSteps = listOf(Challenge.BLINK)
+        )
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = stubSession(),
+            layerScores = AttestationBuilder.stubLayerScores(),
+            ambient = AmbientConditions(),
+            livenessDecision = "fail",
+            challengeResult = result,
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertEquals("", obj.getString("challenge_response"))
     }
 
     // M-1 companion — explicit UNSUPPORTED with a non-null token (odd pair

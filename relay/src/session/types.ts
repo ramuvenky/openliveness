@@ -82,6 +82,14 @@ export const attestationSchema = z
     device_platform: z.enum(['ios', 'android']),
     device_attestation: z.string().min(1).optional(),
     device_id_hash: z.string().min(1),
+    // Defense-in-depth wire marker. The mobile SDKs stamp this `true` when
+    // their liveness path fell back to the Phase-1 hardcoded scores (no
+    // real landmark stream). The relay should refuse `stub_mode: true`
+    // from any session_id not on the CI allowlist — otherwise a hostile
+    // fork that flips the SDK's `allowStubMode` flag could ship an
+    // "always passes" build. Keeping the field optional so builds that
+    // predate this marker continue to parse.
+    stub_mode: z.boolean().optional(),
     ambient_conditions: z
       .object({
         low_light_detected: z.boolean(),

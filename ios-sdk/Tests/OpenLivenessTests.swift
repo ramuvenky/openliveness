@@ -784,6 +784,42 @@ final class OpenLivenessTests: XCTestCase {
         XCTAssertTrue(scores.layer2ChallengeCompleted)
     }
 
+    // Phase 3 Step 4 compile-regression guard. `CDLSession.defaultAllowStubMode`
+    // backs the public init's default-arg expression:
+    //   public init(from:, landmarkStream:, allowStubMode: Bool = CDLSession.defaultAllowStubMode)
+    // Swift inlines default-arg expressions at the caller's module, so the
+    // referenced symbol must be `@usableFromInline internal` or `public` —
+    // `private` is uncompilable. The original Phase-3 commit shipped
+    // `private static let` and failed CI with:
+    //   CDLSession.swift:53:42: error: static property 'defaultAllowStubMode'
+    //   is private and cannot be referenced from a default argument value
+    // Two complementary guards below:
+    //   1. Referencing the symbol by name from the test module (which is
+    //      an external consumer of the public API — `@testable import`
+    //      still can't see `private` or `fileprivate`) will fail to
+    //      compile if a future refactor drops `@usableFromInline internal`.
+    //   2. Constructing CDLSession without the arg exercises the inlined
+    //      default-arg path from outside the SDK module — the exact
+    //      shape that broke under xcodebuild on CI.
+    func testDefaultAllowStubModeIsReferenceableFromExternalModule() {
+        // Package.swift doesn't define OPENLIVENESS_STUB_ALLOWED, so the
+        // `#else` branch wins and the default must resolve to `false`.
+        // Flipping this on by default would silently route Phase-1 stub
+        // scores into every session that forgets to opt in.
+        XCTAssertFalse(
+            CDLSession.defaultAllowStubMode,
+            "defaultAllowStubMode must be false unless OPENLIVENESS_STUB_ALLOWED is set at SDK build time"
+        )
+    }
+
+    func testPublicInitCompilesWithoutExplicitAllowStubMode() {
+        // Pure compile-shape check: if the public init's default-arg
+        // expression stops compiling (e.g. storage reverted to `private`),
+        // this call site goes with it. No behavioral assertion — the stub
+        // vs. real-landmark branches are already covered above.
+        _ = CDLSession(from: makeStubPayload())
+    }
+
     // C-1 — assurance_level must downgrade to software_only when the
     // orchestrator decided `fail` or `inconclusive`, even if hw
     // attestation succeeded. Before the fix the builder emitted "IAL2"

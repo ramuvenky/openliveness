@@ -41,10 +41,18 @@ public final class CDLSession {
     /// they do.
     private let allowStubMode: Bool
 
+    // `@usableFromInline internal` (not `private`) because this is referenced
+    // from the default-argument expression of the `public init` below. Swift
+    // inlines default-argument expressions at the caller's module, so the
+    // referenced symbol must be visible there — `private` would make the init
+    // uncompilable (xcode error "cannot be referenced from a default argument
+    // value"). Keeping the storage `internal` instead of `public` means the
+    // compile-flag mechanism itself isn't part of the SDK's stable API; only
+    // the resolved `allowStubMode` arg is.
     #if OPENLIVENESS_STUB_ALLOWED
-    private static let defaultAllowStubMode = true
+    @usableFromInline internal static let defaultAllowStubMode = true
     #else
-    private static let defaultAllowStubMode = false
+    @usableFromInline internal static let defaultAllowStubMode = false
     #endif
 
     public init(

@@ -1,0 +1,259 @@
+name: iOS Sample
+
+# Two jobs live here:
+#   - `pr-build` fires on every PR touching ios-sample or ios-sdk and
+#     builds + unit-tests the sample on the Simulator. No signing, no
+#     secrets, no device.
+#   - `testflight` fires on a version tag push (v*) or manual dispatch,
+#     runs the SDK + sample tests against a Release build, archives a
+#     signed .ipa, and uploads to TestFlight via the App Store Connect
+#     API. Secret-gated — a fork without the keys set simply skips it.
+#
+# The split exists so a contributor without Apple Developer credentials
+# can still get green CI on PRs: Simulator builds don't need signing,
+# only the TestFlight path does.
+on:
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - 'ios-sample/**'
+      - 'ios-sdk/**'
+      - '.github/workflows/ios-sample.yml'
+  pull_request:
+    paths:
+      - 'ios-sample/**'
+      - 'ios-sdk/**'
+      - '.github/workflows/ios-sample.yml'
+  workflow_dispatch:
+    inputs:
+      upload_to_testflight:
+        description: 'Upload a signed build to TestFlight'
+        required: true
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+jobs:
+  pr-build:
+    # Simulator build on every PR / branch push. macos-14 is the first
+    # runner with Xcode 15 preinstalled, which matches the iOS SDK job
+    # (ios.yml) — keep them aligned so a drift between the two surfaces
+    # as a build failure, not a mysterious runtime mismatch.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios-sample
+        run: xcodegen generate
+
+      - name: Build (iOS Simulator)
+        working-directory: ios-sample
+        # Simulator destination deliberately avoids a signing identity.
+        # `CODE_SIGNING_ALLOWED=NO` + `CODE_SIGNING_REQUIRED=NO` tells
+        # xcodebuild not to resolve a profile — a fork without an Apple
+        # team ID still gets green CI from this step.
+        run: |
+          xcodebuild build \
+            -project OpenLivenessSample.xcodeproj \
+            -scheme OpenLivenessSample \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      # Review fix H-3 (CI half): run the sample's unit tests on PR so
+      # the Info.plist regression pins (H-1 / H-4), the LivenessRunner
+      # cancel pin (H-6), and the promptLabel wire-mapping pin (M-2)
+      # fire before the change can merge. Pairs with the SDK test step
+      # in the `testflight` job below.
+      - name: Test (iOS Simulator)
+        working-directory: ios-sample
+        run: |
+          xcodebuild test \
+            -project OpenLivenessSample.xcodeproj \
+            -scheme OpenLivenessSample \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+  testflight:
+    # Signed archive + TestFlight upload. Runs on version tag pushes
+    # (`v0.1`, `v0.2`, ...) OR a workflow_dispatch with the toggle
+    # flipped. The `if:` guard short-circuits forks that haven't set
+    # the secrets — the whole job is skipped rather than failing with
+    # a confusing "secret not set" error.
+    runs-on: macos-14
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_to_testflight == 'true')
+    environment: testflight
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios-sample
+        run: xcodegen generate
+
+      # Review fix H-3: run the SDK test suite against a Release build
+      # before archiving. A Release-only compile-flag divergence (which
+      # is EXACTLY the C-2 regression this review added a test for) now
+      # fails CI before we ship broken code to internal testers.
+      - name: Test OpenLiveness SDK (Release config)
+        working-directory: ios-sdk
+        run: |
+          xcodebuild test \
+            -scheme OpenLiveness \
+            -configuration Release \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest'
+
+      - name: Install App Store Connect API key
+        # The private key arrives as base64 in a secret because
+        # multiline strings are painful to round-trip through GitHub's
+        # secret store. We decode once into the standard location
+        # xcodebuild looks for (`~/.appstoreconnect/private_keys/`),
+        # matching the convention fastlane / altool expect.
+        #
+        # Review fixes:
+        #   M-3 — `printf '%s'` instead of `echo` so a trailing newline
+        #         doesn't trip `base64 --decode` on some bash versions.
+        #   M-6 — `chmod 600` on the written .p8 is standard credential
+        #         hygiene. On a single-use runner the real-world risk is
+        #         low, but matching the convention keeps the step reusable
+        #         from a self-hosted runner where perms matter more.
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          key_path="$HOME/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+
+      - name: Write ExportOptions.plist
+        # Generated inline (not committed) because `teamID` is tenant-
+        # specific and bakes a secret into any committed copy. The
+        # method is `app-store` so the ExportArchive step produces a
+        # TestFlight-ready .ipa; `appstore` would upload directly but
+        # we want the archive artifact for failure triage.
+        env:
+          APP_STORE_CONNECT_TEAM_ID: ${{ secrets.APP_STORE_CONNECT_TEAM_ID }}
+        run: |
+          cat > /tmp/ExportOptions.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store</string>
+              <key>teamID</key>
+              <string>${APP_STORE_CONNECT_TEAM_ID}</string>
+              <key>signingStyle</key>
+              <string>automatic</string>
+              <key>uploadBitcode</key>
+              <false/>
+              <key>uploadSymbols</key>
+              <true/>
+              <key>stripSwiftSymbols</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Build and archive
+        working-directory: ios-sample
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        # Review fix C-1: `CURRENT_PROJECT_VERSION=${{ github.run_number }}`
+        # overrides the project.yml fallback of "1" so each upload gets a
+        # monotonically-increasing build number (TestFlight rejects
+        # duplicates). run_number is 1-indexed per workflow and strictly
+        # increasing even across force-pushes, which is exactly what we
+        # need here — a tag retry still produces a fresh number.
+        #
+        # Review fix M-8: `GIT_COMMIT_SHA=${{ github.sha }}` embeds the
+        # full commit sha in the app's Info.plist (`GIT_COMMIT_SHA`
+        # key, see project.yml) so TestFlight testers can correlate a
+        # build-number to a specific commit in the repo.
+        #
+        # `-allowProvisioningUpdates` lets xcodebuild create or renew the
+        # provisioning profile against App Store Connect using the API
+        # key we installed above. Without it, automatic signing in a
+        # fresh CI runner fails with "no matching profile".
+        run: |
+          xcodebuild archive \
+            -project OpenLivenessSample.xcodeproj \
+            -scheme OpenLivenessSample \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/OpenLivenessSample.xcarchive \
+            -allowProvisioningUpdates \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" \
+            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8 \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            GIT_COMMIT_SHA=${{ github.sha }}
+
+      - name: Export .ipa
+        working-directory: ios-sample
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath build/OpenLivenessSample.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist /tmp/ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" \
+            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8
+
+      - name: Upload to TestFlight
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        # `altool` is still Apple's supported path for TestFlight upload
+        # as of Xcode 15 (notarytool is the notarization tool, not the
+        # upload tool). The newer alternative is the macOS-only
+        # `Transporter` GUI — not viable from CI. Known-good as of
+        # Oct 2026; revisit when `altool --upload-app` emits a
+        # deprecation warning in CI logs.
+        run: |
+          xcrun altool --upload-app \
+            --type ios \
+            --file ios-sample/build/export/OpenLivenessSample.ipa \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+
+      # Review fix M-5: retain the .ipa on success too, not only the
+      # xcarchive on failure. A build that uploads cleanly but behaves
+      # badly on tester devices still needs a post-mortem artifact.
+      - name: Upload .ipa artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenLivenessSample-ipa-${{ github.run_number }}
+          path: ios-sample/build/export/*.ipa
+
+      - name: Upload archive artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcarchive
+          path: ios-sample/build/OpenLivenessSample.xcarchive

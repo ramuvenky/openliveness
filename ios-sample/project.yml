@@ -1,0 +1,168 @@
+# XcodeGen config for the openliveness iOS dev harness.
+#
+# Rationale: committing a .xcodeproj makes diffing + CI reproducibility
+# painful, and the author doesn't own a Mac to maintain the generated
+# project anyway. This YAML is the single source of truth — CI runs
+# `xcodegen generate` before every build, local developers do the same.
+#
+# To regenerate locally (on any Mac with XcodeGen installed):
+#     brew install xcodegen
+#     cd ios-sample && xcodegen generate
+#
+# After which `OpenLivenessSample.xcodeproj` exists and can be opened in
+# Xcode — but it's .gitignored, so it never lands in a commit.
+name: OpenLivenessSample
+
+options:
+  bundleIdPrefix: dev.openliveness
+  deploymentTarget:
+    iOS: "14.0"
+  createIntermediateGroups: true
+  # Keep the generated project at the sample root so relative paths in
+  # XCArchive / scheme actions stay stable regardless of where the
+  # developer runs xcodegen from.
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1"
+    # Review fix C-1: the build number is a fallback — CI overrides it
+    # with `CURRENT_PROJECT_VERSION=${GITHUB_RUN_NUMBER}` on the
+    # `xcodebuild archive` invocation so each TestFlight upload gets a
+    # monotonically-increasing value. Local builds (which never land in
+    # TestFlight) keep "1".
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+
+packages:
+  OpenLiveness:
+    # Local SwiftPM reference to the sibling SDK. Keeps the sample
+    # pinned to whatever is on disk — same model as the Android sample
+    # using composite Gradle builds.
+    path: ../ios-sdk
+
+targets:
+  OpenLivenessSample:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    resources:
+      - path: Resources
+        excludes:
+          - "*.entitlements"
+          - "Info.plist"
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: OpenLiveness Sample
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Review fix M-8: embed the commit SHA so TestFlight testers can
+        # correlate "the build I'm running" with "a specific commit in
+        # the repo". Default empty for local builds; CI overrides via
+        # xcodebuild `GIT_COMMIT_SHA=$GITHUB_SHA`.
+        GIT_COMMIT_SHA: $(GIT_COMMIT_SHA)
+        # Phase 2 App Attest key registration happens on-device the
+        # first time CDLSession.start() runs. The usage description is
+        # required for front-camera + microphone-less preview to pass
+        # App Review; a non-empty string is mandatory even in
+        # development builds or the OS silently denies the capture
+        # session.
+        NSCameraUsageDescription: >-
+          OpenLiveness uses the front camera to verify a real human is
+          present. Video never leaves this device — only a signed
+          cryptographic proof is sent to the relay.
+        # Review fix H-1: without an ATS exception the sample cannot
+        # reach the dev stub-relay (http://127.0.0.1:8787). Using
+        # `NSAllowsLocalNetworking` instead of `NSAllowsArbitraryLoads`
+        # keeps HTTPS enforcement for public-internet traffic — only
+        # localhost / link-local / mDNS requests are allowed in cleartext.
+        # Safe to leave on in Release because any Release build pointed
+        # at a public HTTP endpoint still gets blocked.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # Review fix H-4: without this, every TestFlight upload parks
+        # in App Store Connect waiting for a human to answer the export-
+        # compliance questionnaire. The sample uses only HTTPS /
+        # standard-crypto App Attest keys, so the "no non-exempt
+        # encryption" answer is accurate.
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities:
+          # arm64 (not armv7) — every iOS 14-capable device is arm64;
+          # listing armv7 would make the sample install on nothing. The
+          # front-facing-camera entry is what blocks install on iPad
+          # models without a selfie cam.
+          - arm64
+          - front-facing-camera
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.openliveness.sample
+        CODE_SIGN_ENTITLEMENTS: Resources/Sample.entitlements
+        # Automatic signing in CI uses App Store Connect API keys
+        # supplied via the ios-sample.yml workflow. Developers running
+        # xcodebuild locally need to flip CODE_SIGN_STYLE=Manual + set
+        # DEVELOPMENT_TEAM to their own team ID.
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+      configs:
+        Debug:
+          # Review fix C-2: this flag used to live here under the
+          # misunderstanding that it would flip the SDK's
+          # `defaultAllowStubMode`. It doesn't — SwiftPM compiles each
+          # module with its own `swiftSettings`, so a flag defined on
+          # the sample module never reaches the SDK module. The actual
+          # fix is in ios-sdk/Package.swift (`.define(..., .when(.debug))`),
+          # and the sample now passes `allowStubMode: true` explicitly
+          # in LivenessRunner. Leaving this empty rather than deleting
+          # the whole block so the Debug/Release split is still obvious.
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+        Release:
+          # Release builds (what TestFlight ships) deliberately empty —
+          # the sample's `allowStubMode: true` is explicit; the server-
+          # side STUB_MODE_RP_ALLOWLIST is the second half of the gate
+          # against a hostile fork.
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+    dependencies:
+      - package: OpenLiveness
+        product: OpenLiveness
+
+  OpenLivenessSampleTests:
+    # Review-driven: a unit-test bundle hosted on the sample app so
+    # `Bundle.main` points at the real app bundle (needed for the
+    # Info.plist regression tests pinning H-1 / H-4). `type:
+    # bundle.unit-test` + a `target:` dependency on the app auto-wires
+    # TEST_HOST / BUNDLE_LOADER in XcodeGen ≥ 2.30.
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: OpenLivenessSample
+      - package: OpenLiveness
+        product: OpenLiveness
+    settings:
+      base:
+        # Tests are debug-only; no code signing needed on sim.
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+
+schemes:
+  OpenLivenessSample:
+    build:
+      targets:
+        OpenLivenessSample: all
+        OpenLivenessSampleTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - OpenLivenessSampleTests
+    archive:
+      config: Release

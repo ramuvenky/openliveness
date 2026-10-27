@@ -16,7 +16,15 @@ interface LandmarkStream {
      * stopping, so a user sees "camera failed" rather than "challenge
      * not completed".
      */
-    suspend fun nextFrame(): Pair<FaceLandmarks, Double>?
+    suspend fun nextFrame(): LandmarkFrame?
+
+    /**
+     * Release underlying resources (MediaPipe FaceLandmarker, result
+     * channel, etc.). Default no-op so pure in-memory test fakes don't
+     * have to implement it. Idempotent; callers invoke in a `finally`
+     * after `Layer2Runner.run()` returns.
+     */
+    fun close() {}
 }
 
 /**

@@ -45,10 +45,10 @@ class Layer2Runner(
         var lastTimestamp = 0.0
         while (true) {
             val frame = stream.nextFrame() ?: break
-            val (landmarks, timestamp) = frame
+            val timestamp = frame.timestampSeconds
             if (firstTimestamp == null) firstTimestamp = timestamp
             lastTimestamp = timestamp
-            val event = sequencer.update(landmarks, timestamp) ?: continue
+            val event = sequencer.update(frame.landmarks, timestamp) ?: continue
             when (event) {
                 is ChallengeEvent.StepCompleted -> {
                     // Progress is "steps completed so far / total steps".

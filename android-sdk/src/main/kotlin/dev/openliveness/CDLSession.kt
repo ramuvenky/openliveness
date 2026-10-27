@@ -52,6 +52,13 @@ class CDLSession(
      *  the relay can refuse `stub_mode: true` payloads from production
      *  session IDs. */
     private val allowStubMode: Boolean = false,
+    /** UI-side progress callback. Fired on every WS processing_update
+     *  with the same (progress, currentLayer) pair the server sees, so
+     *  the sample app's prompt overlay can advance in lockstep with the
+     *  server view. Invoked on the IO dispatcher — implementations that
+     *  touch Views must post to main themselves. Default null so unit
+     *  tests and headless callers aren't forced to supply one. */
+    private val onProgress: ((progress: Float, currentLayer: String) -> Unit)? = null,
 ) {
 
     // Pin to applicationContext so the session never retains an Activity.
@@ -139,8 +146,25 @@ class CDLSession(
         val sequencer = ChallengeSequencer.fromWire(payload.challenge_sequence)
         val runner = Layer2Runner(sequencer, stream) { progress, layer ->
             sendProcessingUpdate(progress, layer)
+            // Isolate integrator-supplied callback: a thrown View touch
+            // or state check must not fail the session. CancellationException
+            // still propagates (see invokeProgressCallbackSafely kdoc).
+            val callbackError = invokeProgressCallbackSafely(onProgress, progress, layer)
+            if (callbackError != null) {
+                Log.w(LOG_TAG, "onProgress callback threw; continuing session", callbackError)
+            }
         }
-        val result = runner.run()
+        val result = try {
+            runner.run()
+        } finally {
+            // Release MediaPipe FaceLandmarker + result channel the
+            // moment the sequencer finishes (or the stream errors out).
+            // The default close() on LandmarkStream is a no-op so test
+            // fakes aren't affected; production MediaPipeLandmarkStream
+            // uses this to tear down native resources promptly rather
+            // than waiting on GC.
+            stream.close()
+        }
 
         // Only layer2 is real in Phase 3; layers 3/4/5 stay at stub
         // confidence so the weighted sum doesn't collapse to a fail

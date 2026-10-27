@@ -1,0 +1,6 @@
+# MediaPipe FaceLandmarker model. ~3.8 MB — too large to commit. The
+# sample's MainActivity surfaces an actionable error when this file is
+# missing; download the float16 variant from:
+#   https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task
+# and place it next to this file.
+face_landmarker.task

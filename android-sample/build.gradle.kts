@@ -32,4 +32,9 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.activity:activity-ktx:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    // Needed because camera-view / camera-core are declared with
+    // `implementation` scope in the SDK — not transitively exposed to
+    // this sample. The sample references PreviewView directly to build
+    // its layout and must list the dep explicitly.
+    implementation("androidx.camera:camera-view:1.3.0")
 }

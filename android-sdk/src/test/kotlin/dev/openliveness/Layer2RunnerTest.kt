@@ -4,6 +4,7 @@ import dev.openliveness.layers.Challenge
 import dev.openliveness.layers.ChallengeSequencer
 import dev.openliveness.layers.FaceLandmark
 import dev.openliveness.layers.FaceLandmarks
+import dev.openliveness.layers.LandmarkFrame
 import dev.openliveness.layers.LandmarkStream
 import dev.openliveness.layers.Layer2Runner
 import kotlinx.coroutines.runBlocking
@@ -23,11 +24,13 @@ class Layer2RunnerTest {
 
     /** Scripted stream: yields a pre-recorded list of frames once,
      *  then returns null — represents a camera that ran out of frames. */
-    private class ScriptedStream(frames: List<Pair<FaceLandmarks, Double>>) : LandmarkStream {
+    private class ScriptedStream(frames: List<LandmarkFrame>) : LandmarkStream {
         private val queue = ArrayDeque(frames)
-        override suspend fun nextFrame(): Pair<FaceLandmarks, Double>? =
+        override suspend fun nextFrame(): LandmarkFrame? =
             if (queue.isEmpty()) null else queue.removeFirst()
     }
+
+    private fun frame(landmarks: FaceLandmarks, ts: Double) = LandmarkFrame(landmarks, ts)
 
     private fun neutralFace(): MutableList<FaceLandmark> {
         val pts = MutableList(FaceLandmarks.EXPECTED_COUNT) { FaceLandmark(0f, 0f) }
@@ -56,9 +59,9 @@ class Layer2RunnerTest {
     fun `run completes and emits terminal progress`() = runBlocking {
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK))
         val stream = ScriptedStream(listOf(
-            closedEye() to 0.0,
-            closedEye() to 0.033,
-            lm(neutralFace()) to 0.066
+            frame(closedEye(), 0.0),
+            frame(closedEye(), 0.033),
+            frame(lm(neutralFace()), 0.066)
         ))
         val calls = mutableListOf<Pair<Float, String>>()
         val runner = Layer2Runner(seq, stream) { p, l -> calls += p to l }
@@ -86,7 +89,7 @@ class Layer2RunnerTest {
         // hanging — otherwise CDLSession.start would never submit the
         // attestation.
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK))
-        val stream = ScriptedStream(listOf(closedEye() to 0.0))
+        val stream = ScriptedStream(listOf(frame(closedEye(), 0.0)))
         val calls = mutableListOf<Pair<Float, String>>()
         val runner = Layer2Runner(seq, stream) { p, l -> calls += p to l }
 
@@ -112,10 +115,10 @@ class Layer2RunnerTest {
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK, Challenge.LOOK_LEFT))
         // Complete the BLINK step, then stream dies before LOOK_LEFT.
         val stream = ScriptedStream(listOf(
-            closedEye() to 0.0,
-            closedEye() to 0.033,
-            lm(neutralFace()) to 0.066,     // BLINK fires here
-            leftGaze() to 0.1               // stream ends after this frame
+            frame(closedEye(), 0.0),
+            frame(closedEye(), 0.033),
+            frame(lm(neutralFace()), 0.066),     // BLINK fires here
+            frame(leftGaze(), 0.1)               // stream ends after this frame
         ))
         val calls = mutableListOf<Pair<Float, String>>()
         val runner = Layer2Runner(seq, stream) { p, l -> calls += p to l }

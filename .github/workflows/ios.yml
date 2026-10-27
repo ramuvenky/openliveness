@@ -4,14 +4,21 @@ on:
   push:
     paths:
       - 'ios-sdk/**'
+      - 'tools/stub-relay/**'
       - '.github/workflows/ios.yml'
   pull_request:
     paths:
       - 'ios-sdk/**'
+      - 'tools/stub-relay/**'
       - '.github/workflows/ios.yml'
 
 jobs:
-  test:
+  # In-process XCTest on the Simulator — this is iOS's equivalent of
+  # Android's `./gradlew test` (src/test/, JVM-only, no network).
+  # `-skip-testing:OpenLivenessIntegrationTests` explicitly keeps the
+  # stub-relay target out of this job, matching the gradle split where
+  # `test` never runs instrumented tests.
+  unit-tests:
     runs-on: macos-14
     defaults:
       run:
@@ -32,4 +39,72 @@ jobs:
         run: xcodebuild build -scheme OpenLiveness -destination 'generic/platform=iOS Simulator'
 
       - name: Test (iOS Simulator)
-        run: xcodebuild test -scheme OpenLiveness -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest'
+        run: |
+          xcodebuild test \
+            -scheme OpenLiveness \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -skip-testing:OpenLivenessIntegrationTests
+
+  # Mirror of android.yml's `instrumented-tests` job. Android spins up the
+  # same Python stub-relay and runs `connectedDebugAndroidTest` on an
+  # emulator at `10.0.2.2:8787`; the iOS Simulator shares the host's
+  # loopback, so our integration target hits `127.0.0.1:8787` directly.
+  # `-only-testing:OpenLivenessIntegrationTests` makes the scope explicit —
+  # if someone drops a non-integration test into that target, it still
+  # runs here and only here.
+  integration-tests:
+    runs-on: macos-14
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install stub-relay dependencies
+        working-directory: tools/stub-relay
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+
+      # Readiness probe mirrors android.yml so a startup failure is visible
+      # before `xcodebuild test` boots a Simulator (slow). Any 2xx on
+      # `/cdl/session/t/complete` means the Flask app is serving requests.
+      - name: Start stub-relay
+        working-directory: tools/stub-relay
+        run: |
+          nohup .venv/bin/python server.py > /tmp/relay.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8787/cdl/session/t/complete \
+                -X POST -H 'Content-Type: application/json' -d '{}' > /dev/null; then
+              echo "relay up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "relay failed to start"
+          cat /tmp/relay.log
+          exit 1
+
+      - name: Integration tests (iOS Simulator)
+        working-directory: ios-sdk
+        run: |
+          xcodebuild test \
+            -scheme OpenLiveness \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -only-testing:OpenLivenessIntegrationTests
+
+      # Dump the relay log on failure — Android does the equivalent via the
+      # test-report artifact. Here the relay is the stateful piece; its
+      # stdout is where "/complete returned 500 because payload was X" lives.
+      - name: Upload stub-relay log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stub-relay-log
+          path: /tmp/relay.log

@@ -1,4 +1,5 @@
 import XCTest
+import Security
 @testable import OpenLiveness
 
 /// End-to-end integration against the Python stub-relay
@@ -13,18 +14,29 @@ import XCTest
 ///         nohup .venv/bin/python server.py > /tmp/relay.log 2>&1 &
 ///     cd ios-sdk && swift test --filter OpenLivenessIntegrationTests
 ///
-/// If the relay isn't up this suite skips (not fails) via a health probe
-/// against `/cdl/session/t/complete` — the same readiness endpoint
-/// `.github/workflows/android.yml` pings. CI runs this target explicitly
-/// via `-only-testing:OpenLivenessIntegrationTests`, so a skip in CI means
-/// the relay failed to start; the integration-tests job surfaces that as
-/// a build failure before test execution.
+/// Skips (not fails) in two environments:
+///   1. Relay not up — health probe at `/cdl/session/t/complete` matches
+///      the `.github/workflows/android.yml` readiness check.
+///   2. Keychain unavailable — the SPM-built xctest bundle has no
+///      keychain-access-group entitlement, so `SecItemAdd` on CI's
+///      macos-14 Simulator returns `errSecMissingEntitlement`. The
+///      existing `OpenLivenessTests.testAttestationBuilderReturnsCanonicalBytes`
+///      uses the same guard. Android's AndroidKeyStore has no equivalent
+///      entitlement requirement on emulators, which is why
+///      `connectedDebugAndroidTest` can run the full flow but iOS CI
+///      only validates the integration *shape* up to the signing step —
+///      the real device-signed E2E coverage comes from `ios-sample`
+///      TestFlight builds.
 final class CDLSessionIntegrationTests: XCTestCase {
 
     private static let relayHTTP = "http://127.0.0.1:8787"
     private static let relayWS   = "ws://127.0.0.1:8787"
 
     func test_fullFlowAgainstStubRelay() async throws {
+        try XCTSkipUnless(
+            keychainIsAvailable(),
+            "Keychain unavailable — unsigned SPM test bundle on CI Simulator can't SecItemAdd; see docstring"
+        )
         try await XCTSkipUnlessRelayReachable()
 
         let sessionId = "sess-\(Int(Date().timeIntervalSince1970 * 1000))"
@@ -81,5 +93,26 @@ final class CDLSessionIntegrationTests: XCTestCase {
                 "stub-relay not reachable at \(Self.relayHTTP) — start it before `swift test` or run via CI's integration-tests job"
             )
         }
+    }
+
+    /// Copied verbatim from `OpenLivenessTests.keychainIsAvailable` — the
+    /// integration suite is a separate test target so can't share the
+    /// helper directly. Keep them in sync if the probe changes.
+    private func keychainIsAvailable() -> Bool {
+        let probeAccount = "dev.openliveness.integration-tests.keychain-probe"
+        let delete: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: probeAccount
+        ]
+        SecItemDelete(delete as CFDictionary)
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: probeAccount,
+            kSecValueData as String: Data([0x01]),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        let status = SecItemAdd(add as CFDictionary, nil)
+        SecItemDelete(delete as CFDictionary)
+        return status == errSecSuccess
     }
 }

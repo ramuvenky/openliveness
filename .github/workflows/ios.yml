@@ -38,11 +38,28 @@ jobs:
       - name: Build (iOS Simulator)
         run: xcodebuild build -scheme OpenLiveness -destination 'generic/platform=iOS Simulator'
 
+      # `name=iPhone 15,OS=latest` is brittle: GitHub rotates the macos-14
+      # image's simulator catalog, and when the named device is absent
+      # xcodebuild silently falls back to building for macOS — surfacing as
+      # "only available in macOS 10.15 or newer" errors against SDK code that
+      # has no macOS availability (Package.swift declares iOS-only). Picking
+      # any available iPhone by UDID is stable across catalog rotations.
+      - name: Discover iOS Simulator
+        run: |
+          UDID=$(xcrun simctl list devices available --json \
+            | jq -r '[.devices | to_entries[]
+                      | select(.key | contains("iOS"))
+                      | .value[] | select(.name | startswith("iPhone"))][0].udid')
+          if [ -z "$UDID" ] || [ "$UDID" = "null" ]; then
+            echo "No available iPhone simulator on this runner"; exit 1
+          fi
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+
       - name: Test (iOS Simulator)
         run: |
           xcodebuild test \
             -scheme OpenLiveness \
-            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
             -skip-testing:OpenLivenessIntegrationTests
 
   # Mirror of android.yml's `instrumented-tests` job. Android spins up the
@@ -91,12 +108,26 @@ jobs:
           cat /tmp/relay.log
           exit 1
 
+      # Same catalog-rotation hazard as the unit-tests job — pick any
+      # available iPhone simulator by UDID so a renamed/removed `iPhone 15`
+      # entry doesn't trip a macOS-fallback build.
+      - name: Discover iOS Simulator
+        run: |
+          UDID=$(xcrun simctl list devices available --json \
+            | jq -r '[.devices | to_entries[]
+                      | select(.key | contains("iOS"))
+                      | .value[] | select(.name | startswith("iPhone"))][0].udid')
+          if [ -z "$UDID" ] || [ "$UDID" = "null" ]; then
+            echo "No available iPhone simulator on this runner"; exit 1
+          fi
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+
       - name: Integration tests (iOS Simulator)
         working-directory: ios-sdk
         run: |
           xcodebuild test \
             -scheme OpenLiveness \
-            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
             -only-testing:OpenLivenessIntegrationTests
 
       # Dump the relay log on failure — Android does the equivalent via the

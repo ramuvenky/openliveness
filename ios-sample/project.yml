@@ -16,7 +16,7 @@ name: OpenLivenessSample
 options:
   bundleIdPrefix: dev.openliveness
   deploymentTarget:
-    iOS: "14.0"
+    iOS: "15.0"
   createIntermediateGroups: true
   # Keep the generated project at the sample root so relative paths in
   # XCArchive / scheme actions stay stable regardless of where the
@@ -33,7 +33,7 @@ settings:
     # TestFlight) keep "1".
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.9"
-    IPHONEOS_DEPLOYMENT_TARGET: "14.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
     SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
 
 packages:
@@ -92,7 +92,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities:
-          # arm64 (not armv7) — every iOS 14-capable device is arm64;
+          # arm64 (not armv7) — every iOS 15-capable device is arm64;
           # listing armv7 would make the sample install on nothing. The
           # front-facing-camera entry is what blocks install on iPad
           # models without a selfie cam.

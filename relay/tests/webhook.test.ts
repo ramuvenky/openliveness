@@ -501,4 +501,63 @@ describe('callWebhook integration', () => {
       expect.stringMatching(/delivery failed/),
     );
   });
+
+  // Phase 2 drift tests — the webhook body is what the RP consumes, so
+  // the downgrade-signal field must land here verbatim or the whole
+  // Phase 2 story disappears for anyone who doesn't parse the JWT.
+
+  it('includes hw_attestation_status in the webhook body when the attestation has one', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    const attWithStatus: CDLAttestation = {
+      ...att,
+      assurance_level: 'IAL2',
+      hw_attestation_status: 'ok',
+    };
+    await callWebhook(
+      makeSession({ webhook_url: 'https://8.8.8.8/hook' }),
+      'tok',
+      attWithStatus,
+      true,
+      log,
+    );
+    const [, opts] = mockDeliverPinned.mock.calls[0] as [string, { body: string }];
+    expect(JSON.parse(opts.body)).toMatchObject({ hw_attestation_status: 'ok' });
+  });
+
+  it('passes hw_attestation_status=failed through verbatim (downgrade signal)', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    const attFailed: CDLAttestation = { ...att, hw_attestation_status: 'failed' };
+    await callWebhook(
+      makeSession({ webhook_url: 'https://8.8.8.8/hook' }),
+      'tok',
+      attFailed,
+      false,
+      log,
+    );
+    const [, opts] = mockDeliverPinned.mock.calls[0] as [string, { body: string }];
+    expect(JSON.parse(opts.body)).toMatchObject({
+      assurance_level: 'software_only',
+      hw_attestation_status: 'failed',
+    });
+  });
+
+  it('omits (does not null) hw_attestation_status when the attestation has none', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.WEBHOOK_SIGNING_SECRET = 'sek';
+    // Default `att` has no hw_attestation_status (older-SDK path).
+    await callWebhook(
+      makeSession({ webhook_url: 'https://8.8.8.8/hook' }),
+      'tok',
+      att,
+      false,
+      log,
+    );
+    const [, opts] = mockDeliverPinned.mock.calls[0] as [string, { body: string }];
+    const parsed = JSON.parse(opts.body);
+    // Must be absent, not null. Null would be an RP-visible claim; absent
+    // means "the SDK didn't tell us" and lets the RP distinguish the two.
+    expect('hw_attestation_status' in parsed).toBe(false);
+  });
 });

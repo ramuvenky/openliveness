@@ -45,6 +45,15 @@ export async function issueAttestationJWT(
     },
     // true only when the relay verified the proof, not just when a field was present
     cdl_hardware_attested: hardwareAttested,
+    // Downgrade-attack signal from the mobile SDK: 'ok' matches a
+    // successful hardware attempt (and therefore IAL2); 'failed' with
+    // software_only tells the RP "the device tried and could not", which
+    // is distinct from 'unsupported' = "device cannot do this at all".
+    // Omitted when the SDK pre-dates the field — RPs can tell "unknown"
+    // from "ok" by the field being absent vs. equal to 'ok'.
+    ...(attestation.hw_attestation_status !== undefined
+      ? { cdl_hw_status: attestation.hw_attestation_status }
+      : {}),
     cdl_attestation_hash: sha256hex(canonicalize(attestation)),
     cdl_low_light: attestation.ambient_conditions.low_light_detected,
     cdl_motion: attestation.ambient_conditions.motion_detected,

@@ -26,6 +26,10 @@ export interface CDLSession {
   phone_token: string;
   liveness_decision: string | null;
   assurance_level: string | null;
+  // Phase 2 downgrade-attack signal persisted from the attestation. Null
+  // when the submitting SDK pre-dates the field. See checkAssurance for
+  // the ↔ assurance_level invariants enforced at submission time.
+  hw_attestation_status: 'ok' | 'unsupported' | 'failed' | null;
   attestation_hash: string | null;
   // SHA-256 of the issued JWT (base64url). We deliberately do NOT persist
   // the raw token in Redis; see src/session/tokenCache.ts for the handoff.
@@ -54,6 +58,14 @@ export const attestationSchema = z
     timestamp: z.string().datetime(),
     liveness_decision: z.enum(['pass', 'fail', 'inconclusive']),
     assurance_level: z.enum(['IAL2', 'IAL1', 'software_only']),
+    // Phase 2 downgrade-attack signal. Lets the server distinguish
+    // "device cannot attest" (expected software_only) from "device
+    // tried and failed" (potential forced downgrade). Optional so
+    // older SDK builds that pre-date the field don't fail the strict
+    // schema. When absent, the field is omitted (not nulled) from the
+    // attestation JWT and the webhook body so consumers can distinguish
+    // "SDK didn't say" from "SDK said ok".
+    hw_attestation_status: z.enum(['ok', 'unsupported', 'failed']).optional(),
     layer_scores: z
       .object({
         layer2_challenge_completed: z.boolean(),
@@ -70,6 +82,14 @@ export const attestationSchema = z
     device_platform: z.enum(['ios', 'android']),
     device_attestation: z.string().min(1).optional(),
     device_id_hash: z.string().min(1),
+    // Defense-in-depth wire marker. The mobile SDKs stamp this `true` when
+    // their liveness path fell back to the Phase-1 hardcoded scores (no
+    // real landmark stream). The relay should refuse `stub_mode: true`
+    // from any session_id not on the CI allowlist — otherwise a hostile
+    // fork that flips the SDK's `allowStubMode` flag could ship an
+    // "always passes" build. Keeping the field optional so builds that
+    // predate this marker continue to parse.
+    stub_mode: z.boolean().optional(),
     ambient_conditions: z
       .object({
         low_light_detected: z.boolean(),

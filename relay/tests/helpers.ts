@@ -22,6 +22,7 @@ export function makeSession(over: Partial<CDLSession> = {}): CDLSession {
     phone_token: 'phone-token',
     liveness_decision: null,
     assurance_level: null,
+    hw_attestation_status: null,
     attestation_hash: null,
     jwt_hash: null,
     jwt_issued_at: null,

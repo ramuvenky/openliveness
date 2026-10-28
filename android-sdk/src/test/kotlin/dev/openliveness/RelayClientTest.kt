@@ -134,4 +134,46 @@ class RelayClientTest {
         }
         assertTrue(ex.message!!.contains("malformed"))
     }
+
+    // MARK: - Phase 2 — Play Integrity nonce round-trip
+    //
+    // CDLSession.requestDeviceAttestation() POSTs to the per-session
+    // integrity-nonce endpoint and feeds the returned nonce into Play
+    // Integrity. These pin the client half of that round-trip so wiring
+    // regressions (wrong path, missing nonce, HTTP error) surface here
+    // instead of silently downgrading every session to software_only.
+
+    @Test
+    fun `requestIntegrityNonce returns parsed nonce on success`() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"nonce":"nonce-abc"}"""))
+        val nonce = client.requestIntegrityNonce("sess-1")
+        assertEquals("nonce-abc", nonce)
+        val recorded = server.takeRequest()
+        assertEquals("/cdl/session/sess-1/integrity-nonce", recorded.path)
+        assertEquals("POST", recorded.method)
+        // Body must be an empty JSON object: the relay keys the nonce on
+        // session_id (from the URL), not on anything in the body, so a
+        // regression that smuggled fields in here would mask a routing
+        // bug. Content-Type must also match what the relay expects.
+        assertEquals("{}", recorded.body.readUtf8())
+        assertTrue(recorded.getHeader("Content-Type")?.contains("application/json") == true)
+    }
+
+    @Test
+    fun `requestIntegrityNonce throws when nonce field is missing`() {
+        server.enqueue(MockResponse().setBody("""{}"""))
+        val ex = assertThrows(CDLException::class.java) {
+            runBlocking { client.requestIntegrityNonce("sess-1") }
+        }
+        assertTrue(ex.message!!.contains("nonce"))
+    }
+
+    @Test
+    fun `requestIntegrityNonce surfaces non-2xx with body`() {
+        server.enqueue(MockResponse().setResponseCode(429).setBody("rate-limited"))
+        val ex = assertThrows(CDLException::class.java) {
+            runBlocking { client.requestIntegrityNonce("sess-1") }
+        }
+        assertTrue(ex.message!!.contains("429"))
+    }
 }

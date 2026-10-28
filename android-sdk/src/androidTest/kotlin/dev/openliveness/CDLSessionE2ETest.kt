@@ -46,7 +46,10 @@ class CDLSessionE2ETest {
             version = "1.0"
         )
 
-        val response = CDLSession(payload, context).start()
+        // allowStubMode=true: this E2E runs without a camera / landmarkStream,
+        // so it deliberately exercises the stub path. Production builds that
+        // omit the stream get a hard throw instead.
+        val response = CDLSession(payload, context, allowStubMode = true).start()
 
         assertEquals(true, response.accepted)
         assertNotNull(response.attestationToken)
@@ -87,6 +90,53 @@ class CDLSessionE2ETest {
         assertTrue(
             "expected close-before-ack message, got: ${ex.message}",
             ex.message!!.contains("acknowledgement")
+        )
+    }
+
+    /// S-NEW-1(b) — production builds must reject the stub-liveness path.
+    /// A CDLSession constructed without a landmarkStream and with the
+    /// default `allowStubMode=false` must throw a CDLException at
+    /// start()-time rather than silently running stub scores. The ack
+    /// must land first so the throw comes from runLiveness (the gate),
+    /// not from the ack timeout — if a regression moved the stub path
+    /// earlier in start() this test would still catch it, but the exact
+    /// message assertion pins down the gate location.
+    @Test
+    fun startThrowsWhenStubModeDisallowedAndNoLandmarkStream() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val server = MockWebServer().also { mockRelay = it }
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(ws: WebSocket, response: okhttp3.Response) {
+                    // Ack immediately so start() reaches runLiveness, where
+                    // the stub-gate throw lives.
+                    ws.send("""{"type":"session_acknowledged"}""")
+                }
+                override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                    ws.close(code, reason)
+                }
+            })
+        )
+        server.start()
+        val wsUrl = server.url("/cdl/session/x/ws").toString().replaceFirst("http", "ws")
+        val payload = QRPayload(
+            session_id = "x",
+            challenge_id = "c",
+            challenge_sequence = listOf("blink"),
+            relay_ws = wsUrl,
+            relay_http = server.url("/").toString().trimEnd('/'),
+            expires_at = "2099-01-01T00:00:00Z",
+            version = "1.0"
+        )
+
+        // Default allowStubMode=false, no landmarkStream — the production
+        // configuration a downstream integrator ships. Must throw.
+        val ex = assertThrows(CDLException::class.java) {
+            runBlocking { CDLSession(payload, context).start() }
+        }
+        assertTrue(
+            "expected stub-gate message, got: ${ex.message}",
+            ex.message!!.contains("stub liveness path is disabled")
         )
     }
 

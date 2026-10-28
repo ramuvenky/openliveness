@@ -128,4 +128,82 @@ describe('assurance', () => {
     const att = await makeAttestation({ assurance_level: 'IAL2' });
     expect(() => checkAssurance(att, makeSession({ assurance_required: 'IAL2' }), true)).not.toThrow();
   });
+
+  // Phase 2 drift tests — hw_attestation_status ↔ assurance_level cross-check.
+  // The field is validated here (not just stored) because an attestation that
+  // claims IAL2 but reports hw_attestation_status != 'ok' is internally
+  // inconsistent: it means the client stamped the higher assurance level but
+  // also admits the hardware step didn't actually succeed. Reject up front
+  // instead of letting the inconsistency flow into the JWT.
+
+  it('rejects hw_attestation_status=ok paired with software_only', async () => {
+    const att = await makeAttestation({ hw_attestation_status: 'ok' });
+    expect(() => checkAssurance(att, makeSession(), false)).toThrowError(
+      expect.objectContaining({ code: 'ERR_SCHEMA_INVALID' }),
+    );
+  });
+
+  it('rejects hw_attestation_status=ok paired with IAL1', async () => {
+    const att = await makeAttestation({
+      assurance_level: 'IAL1',
+      hw_attestation_status: 'ok',
+    });
+    expect(() => checkAssurance(att, makeSession(), true)).toThrowError(
+      expect.objectContaining({ code: 'ERR_SCHEMA_INVALID' }),
+    );
+  });
+
+  it('rejects IAL2 paired with hw_attestation_status=failed', async () => {
+    const att = await makeAttestation({
+      assurance_level: 'IAL2',
+      hw_attestation_status: 'failed',
+    });
+    expect(() => checkAssurance(att, makeSession({ assurance_required: 'IAL2' }), true)).toThrowError(
+      expect.objectContaining({ code: 'ERR_SCHEMA_INVALID' }),
+    );
+  });
+
+  it('rejects IAL2 paired with hw_attestation_status=unsupported', async () => {
+    const att = await makeAttestation({
+      assurance_level: 'IAL2',
+      hw_attestation_status: 'unsupported',
+    });
+    expect(() => checkAssurance(att, makeSession({ assurance_required: 'IAL2' }), true)).toThrowError(
+      expect.objectContaining({ code: 'ERR_SCHEMA_INVALID' }),
+    );
+  });
+
+  it('accepts IAL2 with hw_attestation_status=ok and verified hardware', async () => {
+    const att = await makeAttestation({
+      assurance_level: 'IAL2',
+      hw_attestation_status: 'ok',
+    });
+    expect(() => checkAssurance(att, makeSession({ assurance_required: 'IAL2' }), true)).not.toThrow();
+  });
+
+  // The downgrade-signal paths — the client reports hardware tried & failed,
+  // and claims the matching software_only level. The relay must accept the
+  // honest downgrade, log it, and let policy decide; rejecting here would
+  // disable the whole downgrade-detection story.
+  it('accepts software_only + failed', async () => {
+    const att = await makeAttestation({ hw_attestation_status: 'failed' });
+    expect(() => checkAssurance(att, makeSession(), false)).not.toThrow();
+  });
+
+  it('accepts software_only + unsupported', async () => {
+    const att = await makeAttestation({ hw_attestation_status: 'unsupported' });
+    expect(() => checkAssurance(att, makeSession(), false)).not.toThrow();
+  });
+
+  // Field is optional in the schema (older SDKs). A missing field must behave
+  // exactly like today's attestation flow — no new reject path.
+  it('accepts software_only with hw_attestation_status missing (older SDK)', async () => {
+    const att = await makeAttestation();
+    expect(() => checkAssurance(att, makeSession(), false)).not.toThrow();
+  });
+
+  it('accepts IAL2 + verified hardware with hw_attestation_status missing (older SDK)', async () => {
+    const att = await makeAttestation({ assurance_level: 'IAL2' });
+    expect(() => checkAssurance(att, makeSession({ assurance_required: 'IAL2' }), true)).not.toThrow();
+  });
 });

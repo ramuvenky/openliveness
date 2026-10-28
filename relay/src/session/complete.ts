@@ -53,6 +53,35 @@ export async function completeSession(
   }
 
   try {
+    // 3a. stub_mode policy. The mobile SDKs stamp `stub_mode: true` on the
+    // attestation root when their liveness path fell back to the Phase-1
+    // hardcoded layer scores (no real landmark stream). A hostile fork that
+    // flips the SDK's `allowStubMode` flag could ship an "always passes"
+    // build, so the server MUST refuse `stub_mode: true` from any RP that
+    // isn't explicitly allowlisted. We log every stub_mode:true arrival on
+    // both the accept and the reject branch — the metric is as valuable as
+    // the rejection, since a sudden rise in allowlisted stub traffic is
+    // itself a signal (misconfiguration, CI runaway, allowlist drift).
+    //
+    // Positioned after session-state checks (so expired / wrong-state
+    // sessions return their native error, not a policy error that leaks
+    // state existence) but BEFORE challenge / signature / hardware
+    // verification — a policy refusal is cheap and doesn't deserve to
+    // burn the challenge or do an ECDSA verify.
+    if (att.stub_mode === true) {
+      const allowed = config().stubModeRpAllowlist.includes(session.relying_party);
+      log.warn(
+        {
+          event: 'stub_mode_submitted',
+          session_id: sessionId,
+          relying_party: session.relying_party,
+          allowed,
+        },
+        'stub_mode_submitted',
+      );
+      if (!allowed) throw new CDLError('ERR_STUB_MODE_FORBIDDEN');
+    }
+
     // 4 and 5. challenge binding
     if (await isChallengeUsed(att.challenge_id)) throw new CDLError('ERR_CHALLENGE_REUSED');
     checkChallenge(att, session);
@@ -90,14 +119,31 @@ export async function completeSession(
 
     // 12. state
     const passed = att.liveness_decision === 'pass';
+    // Persist the downgrade-attack signal so later queries (per-device
+    // clustering, operator dashboards) can see which bucket a session
+    // ended up in. Null when the SDK pre-dates the field.
+    const hwStatus = att.hw_attestation_status ?? null;
     await updateSession(sessionId, {
       state: passed ? 'complete' : 'failed',
       liveness_decision: att.liveness_decision,
       assurance_level: att.assurance_level,
+      hw_attestation_status: hwStatus,
       attestation_hash: sha256hex(canonicalize(att)),
       jwt_hash: sha256base64url(token),
       jwt_issued_at: new Date().toISOString(),
     });
+    // Surface the status in the structured log so an operator grepping
+    // for `hw_attestation_status=failed` can find the clustering signal
+    // without having to decode the attestation hash back to the row.
+    log.info(
+      {
+        session_id: sessionId,
+        assurance_level: att.assurance_level,
+        hw_attestation_status: hwStatus,
+        liveness_decision: att.liveness_decision,
+      },
+      'session_complete',
+    );
 
     // 13. tell the browser and the phone
     if (passed) {
@@ -119,8 +165,16 @@ export async function completeSession(
     }
     toPhone(sessionId, { type: 'attestation_received', timestamp: now() });
 
-    // 14. webhook, not awaited so a slow receiver cannot hold the phone up
-    void callWebhook({ ...session, assurance_level: att.assurance_level }, token, att, hardware.attested, log);
+    // 14. webhook, not awaited so a slow receiver cannot hold the phone up.
+    // callWebhook reads hw_attestation_status off `att`, not `session`, so
+    // we don't need to patch the session field for the webhook body.
+    void callWebhook(
+      { ...session, assurance_level: att.assurance_level },
+      token,
+      att,
+      hardware.attested,
+      log,
+    );
 
     return { token, decision: att.liveness_decision };
   } catch (e) {

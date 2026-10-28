@@ -30,6 +30,18 @@ export function config() {
     sessionExpiryMinutes: Number(env.SESSION_EXPIRY_MINUTES ?? 5),
     attestationMaxAgeSeconds: Number(env.ATTESTATION_MAX_AGE_SECONDS ?? 120),
     hardwareMode: (env.HARDWARE_ATTESTATION ?? (secure ? 'enforce' : 'stub')) as 'stub' | 'enforce',
+    // Allowlist of relying_party values permitted to submit attestations with
+    // `stub_mode: true`. Mobile SDKs stamp that marker when their liveness
+    // path fell back to the Phase-1 hardcoded scores (no real landmark
+    // stream); accepting it from an arbitrary RP would let a hostile fork
+    // ship an "always passes" build. Keep empty in production — populate only
+    // for CI / integration RPs. CSV form so a single env var carries any
+    // number of entries; empty strings are filtered out so a trailing comma
+    // or an unset var cleanly means "nobody is allowed".
+    stubModeRpAllowlist: (env.STUB_MODE_RP_ALLOWLIST ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     // Shared secret the relay uses to sign webhook bodies (HMAC-SHA256 →
     // X-OpenLiveness-Signature). Required for webhook delivery; if unset the
     // relay logs and skips the webhook rather than sending an unauthenticated

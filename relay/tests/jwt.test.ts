@@ -44,6 +44,48 @@ describe('jwt and jwks', () => {
     await expect(jwtVerify(token, jwks, { audience: 'bank-b.com' })).rejects.toThrow();
   });
 
+  // Phase 2 drift — cdl_hw_status surfaces the downgrade signal to RPs
+  // via the JWT. The claim must be present when the SDK reported one
+  // (so an RP can gate on it) and absent when the SDK didn't (so an RP
+  // can distinguish "pre-Phase-2 client" from "client said ok").
+  it('includes cdl_hw_status when the attestation carries one', async () => {
+    const att = await makeAttestation({
+      assurance_level: 'IAL2',
+      hw_attestation_status: 'ok',
+    });
+    const jwks = createLocalJWKSet((await getJwks()) as never);
+    const token = await issueAttestationJWT(att, makeSession(), true);
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer: 'http://relay.test:3000',
+      audience: 'example-bank.com',
+    });
+    expect(payload.cdl_hw_status).toBe('ok');
+  });
+
+  it('surfaces hw_attestation_status=failed verbatim (downgrade signal)', async () => {
+    const att = await makeAttestation({ hw_attestation_status: 'failed' });
+    const jwks = createLocalJWKSet((await getJwks()) as never);
+    const token = await issueAttestationJWT(att, makeSession(), false);
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer: 'http://relay.test:3000',
+      audience: 'example-bank.com',
+    });
+    expect(payload.cdl_hw_status).toBe('failed');
+  });
+
+  it('omits cdl_hw_status when the attestation did not include one (older SDK)', async () => {
+    const att = await makeAttestation();
+    const jwks = createLocalJWKSet((await getJwks()) as never);
+    const token = await issueAttestationJWT(att, makeSession(), false);
+    const { payload } = await jwtVerify(token, jwks, {
+      issuer: 'http://relay.test:3000',
+      audience: 'example-bank.com',
+    });
+    // Must be truly absent, not null — null would be an RP-visible signal
+    // ("client said no") which is different from "client didn't say".
+    expect('cdl_hw_status' in payload).toBe(false);
+  });
+
   // L1 — jti is a per-token random id. Enables RP-side "have I seen this
   // exact token before?" dedupe caches even if a buggy relay ever issued
   // twice for the same session.

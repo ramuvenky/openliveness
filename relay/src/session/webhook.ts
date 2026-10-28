@@ -179,6 +179,14 @@ export async function callWebhook(
     relying_party: session.relying_party,
     liveness_decision: att.liveness_decision,
     assurance_level: att.assurance_level,
+    // Phase 2 downgrade signal. 'ok' matches IAL2; 'failed'/'unsupported'
+    // paired with software_only is the honest-downgrade case and lets the
+    // RP's own fraud pipeline cluster per-device without parsing the JWT.
+    // Omitted (not nulled) when the submitting SDK pre-dates the field so
+    // consumers can distinguish "SDK didn't tell us" from "SDK told us ok".
+    ...(att.hw_attestation_status !== undefined
+      ? { hw_attestation_status: att.hw_attestation_status }
+      : {}),
     attestation_token: token,
     hardware_attested: hardwareAttested,
     device_platform: att.device_platform,

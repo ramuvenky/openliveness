@@ -25,6 +25,18 @@ interface LandmarkStream {
      * after `Layer2Runner.run()` returns.
      */
     fun close() {}
+
+    /**
+     * The RGB sink this stream forwards per-frame skin samples to, if
+     * any. Default `null` keeps existing fakes compile-clean. Production
+     * [MediaPipeLandmarkStream] overrides this with the sink it was
+     * constructed with, which lets [CDLSession] verify that the Layer-3
+     * collector it was handed is the SAME one receiving frames — the
+     * previous API required the caller to pass the same sink into two
+     * constructors and silently reported pulseDetected=false if they
+     * ever drifted.
+     */
+    val rgbSink: RGBSampleSink? get() = null
 }
 
 /**

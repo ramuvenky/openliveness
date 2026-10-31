@@ -9,6 +9,8 @@ import dev.openliveness.layers.ChallengeResult
 import dev.openliveness.layers.ChallengeSequencer
 import dev.openliveness.layers.LandmarkStream
 import dev.openliveness.layers.Layer2Runner
+import dev.openliveness.layers.Layer3RPPG
+import dev.openliveness.layers.Layer5Behavioral
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -41,6 +43,27 @@ class CDLSession(
      *  a ChallengeSequencer against the stream and the attestation
      *  reports the real Layer-2 result. */
     private val landmarkStream: LandmarkStream? = null,
+    /** Optional Layer-3 POS-rPPG collector. The integrator constructs
+     *  this alongside [landmarkStream] and wires it as the stream's
+     *  `rgbSink` (see MediaPipeLandmarkStream.fromAsset's `rgbSink` arg),
+     *  so per-frame skin-region R/G/B samples flow into it during
+     *  Layer2Runner.run(); [start] then calls `compute()` at session end
+     *  and folds the result into layerScores.
+     *
+     *  **One-session-use**: the collector accumulates monotonically up to
+     *  [Layer3RPPG.MAX_SAMPLES]. Create a fresh instance per session the
+     *  same way [MediaPipeLandmarkStream] is one-session-use, or call
+     *  `.reset()` before re-binding.
+     *
+     *  When null (default), the Layer-3 stub scores from
+     *  [AttestationBuilder.stubLayerScores] stay in place — preserves the
+     *  pre-Phase-4 behavior for harnesses that haven't adopted rPPG yet.
+     *  When non-null but `compute()` returns null (not enough samples /
+     *  degenerate signal), the attestation reports Layer-3 as failed
+     *  (pulseDetected=false, bpmInRange=false, confidence=0f) rather than
+     *  falling back to the optimistic stub — once an integrator opts in,
+     *  the honest-failure path is the one the server expects. */
+    private val layer3: Layer3RPPG? = null,
     /** Escape hatch for the Phase-1 stub liveness path. Default `false`
      *  so a production integrator who forgets to inject a [landmarkStream]
      *  gets a loud CDLException at `start()` rather than silently shipping
@@ -74,6 +97,7 @@ class CDLSession(
 
     init {
         checkStubGate(allowStubMode, BuildConfig.STUB_PATH_ENABLED)
+        checkLayer3Wiring(layer3, landmarkStream)
     }
 
     suspend fun start(): RelayClient.CompleteResponse {
@@ -131,7 +155,15 @@ class CDLSession(
      * check. The null-result signal is still what tells `.build(...)`
      * to echo the legacy challenge_response and stamp `stub_mode=true`.
      */
-    private suspend fun runLiveness(ambient: AmbientConditions): Pair<LayerScores, ChallengeResult?> {
+    internal suspend fun runLiveness(ambient: AmbientConditions): Pair<LayerScores, ChallengeResult?> {
+        // Clear any residual samples before a (re)run — in practice the
+        // init-time wiring check forbids re-using a Layer3RPPG whose
+        // compute() has already finalised (it's `finalised` latch would
+        // reject new samples anyway), but a caller who legitimately re-
+        // invokes start() on the same CDLSession must not inherit stale
+        // samples from the earlier run. Calling reset() also clears the
+        // finalised latch so a fresh buffer actually accepts samples.
+        layer3?.reset()
         val stream = landmarkStream
         if (stream == null) {
             if (!allowStubMode) {
@@ -144,7 +176,8 @@ class CDLSession(
             return AttestationBuilder.stubLayerScores() to null
         }
         val sequencer = ChallengeSequencer.fromWire(payload.challenge_sequence)
-        val runner = Layer2Runner(sequencer, stream) { progress, layer ->
+        val layer5 = Layer5Behavioral()
+        val runner = Layer2Runner(sequencer, stream, layer5) { progress, layer ->
             sendProcessingUpdate(progress, layer)
             // Isolate integrator-supplied callback: a thrown View touch
             // or state check must not fail the session. CancellationException
@@ -166,14 +199,29 @@ class CDLSession(
             stream.close()
         }
 
-        // Only layer2 is real in Phase 3; layers 3/4/5 stay at stub
-        // confidence so the weighted sum doesn't collapse to a fail
-        // just because other detectors haven't shipped yet. The hard
-        // rule still triggers via layer2ChallengeCompleted == false
-        // when the user doesn't complete the challenge.
-        val scores = AttestationBuilder.stubLayerScores().copy(
+        // Phase 4 Step 5 — Layer 3 outputs are now real when the
+        // integrator wired a Layer3RPPG (see Layer3RPPG + Spec §1356-1405).
+        // Compute runs AFTER runner.run() (and after the stream close in
+        // the finally above) so the sample buffer is complete and no new
+        // onSample callbacks race the snapshot. Layer 4 stays at stub
+        // confidence until Phase 5 (TFLite texture model). The hard rule
+        // still triggers via layer2ChallengeCompleted == false when the
+        // user doesn't complete the challenge.
+        val layer3Result = layer3?.compute(ambient.lowLightDetected)
+        val base = AttestationBuilder.stubLayerScores().copy(
             layer2ChallengeCompleted = result.completed,
-            layer2ChallengeScore = if (result.completed) result.score else 0f
+            layer2ChallengeScore = if (result.completed) result.score else 0f,
+            layer5BehavioralScore = layer5.behavioralScore,
+            layer5MicrosaccadeDetected = layer5.microsaccadeDetected,
+        )
+        // When a Layer3RPPG was wired, publish its result — including the
+        // null-signal failure path (0 confidence, false flags). Without a
+        // wiring we leave the stub values untouched so pre-Phase-4
+        // harnesses see unchanged behavior.
+        val scores = if (layer3 == null) base else base.copy(
+            layer3PulseDetected = layer3Result?.pulseDetected == true,
+            layer3BpmInRange = layer3Result?.bpmInRange == true,
+            layer3RppgConfidence = layer3Result?.confidence ?: 0f,
         )
         return scores to result
     }
@@ -351,6 +399,45 @@ class CDLSession(
                     "(BuildConfig.STUB_PATH_ENABLED=false). The Phase-1 stub liveness path " +
                     "is compiled out of release builds — use the debug SDK variant for " +
                     "test harnesses, or wire a real LandmarkStream."
+                )
+            }
+        }
+
+        /**
+         * Pre-run wiring check for the Phase-4 Layer-3 injection. The pre-
+         * fix API let an integrator construct Layer3RPPG twice (once for
+         * `rgbSink` on the stream, once passed into CDLSession) and ship
+         * — the stream fed samples to one, CDLSession.compute() read the
+         * other, and the attestation always reported confidence=0 /
+         * pulseDetected=false. Equally silently it allowed passing a
+         * Layer3RPPG without wiring it to the stream at all. Both paths
+         * are integrator-facing footguns; this check converts them to a
+         * loud construction-time failure.
+         *
+         * Null `layer3` is still legal (Phase-4-optional, pre-Phase-4
+         * harnesses). Null `landmarkStream` is still legal (stub path).
+         * Only the combination "layer3 non-null AND stream non-null AND
+         * stream.rgbSink !== layer3" is the bug.
+         *
+         * Reference equality (`!==`) is deliberate: two Layer3RPPG
+         * instances are never semantically equal, and the one receiving
+         * samples is the one whose buffer gets filled. An override of
+         * [LandmarkStream.rgbSink] that returned `null` while samples
+         * were actually flowing elsewhere would also trip this check,
+         * which is the correct behavior (loud mis-wiring beats silent
+         * zero-confidence).
+         */
+        @JvmStatic
+        internal fun checkLayer3Wiring(layer3: Layer3RPPG?, stream: LandmarkStream?) {
+            if (layer3 == null || stream == null) return
+            val sink = stream.rgbSink
+            if (sink !== layer3) {
+                throw IllegalArgumentException(
+                    "layer3 must be the SAME instance as landmarkStream.rgbSink " +
+                    "(got layer3=$layer3, stream.rgbSink=$sink). Pass the Layer3RPPG " +
+                    "into both MediaPipeLandmarkStream.fromAsset(rgbSink = ...) and " +
+                    "CDLSession(layer3 = ...) — a mismatch would silently route samples " +
+                    "to one instance and read scores from the other."
                 )
             }
         }

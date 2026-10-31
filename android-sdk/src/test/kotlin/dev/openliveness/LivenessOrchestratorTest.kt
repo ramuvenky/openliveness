@@ -187,6 +187,94 @@ class LivenessOrchestratorTest {
         assertEquals("software_only", r.assuranceLevel)
     }
 
+    // MARK: - Layer 3 failure path (Phase 4 Step 5)
+
+    // Phase 4 wired real Layer3RPPG into CDLSession. When compute() returns
+    // null (insufficient samples / zero-mean / zero-std guards), CDLSession
+    // publishes confidence=0 + both flags=false. These tests pin that the
+    // orchestrator handles that case sanely: L3's 0.25 weight simply drops
+    // out, and the remaining layers either carry the session or not.
+
+    @Test
+    fun `layer3 compute failure with 0_9 others lands inconclusive by default`() {
+        // Realistic post-Phase-4 scenario: rPPG couldn't lock a pulse but
+        // everything else is strong. 0.9*(0.30+0.20+0.15+0.10) + 0*0.25
+        // = 0.675 — safely inside the [0.60, 0.75) inconclusive band.
+        // This is the server-visible consequence of a real L3 failure
+        // and must not accidentally pass.
+        val s = fullPass().copy(
+            layer2ChallengeScore = 0.9f,
+            layer3PulseDetected = false,
+            layer3BpmInRange = false,
+            layer3RppgConfidence = 0f,
+            layer4LbpScore = 0.9f,
+            layer4FourierScore = 0.9f,
+            layer5BehavioralScore = 0.9f,
+        )
+        val r = LivenessOrchestrator().orchestrate(
+            s, AmbientConditions(), hardwareAttestationVerified = true
+        )
+        assertEquals("inconclusive", r.decision)
+        assertEquals("software_only", r.assuranceLevel)
+    }
+
+    @Test
+    fun `layer3 compute failure under low light still passes with strong others`() {
+        // Spec §1633-1644 cuts L3 weight to 0.15 in low light precisely
+        // so an rPPG failure in a dim room doesn't single-handedly
+        // doom the session. With others at 0.9: 0.9*(0.35+0.20+0.15+0.15)
+        // + 0*0.15 = 0.765 — above PASS_THRESHOLD. This is the behavior
+        // the ambient reweighting is designed to produce when rPPG drops
+        // out legitimately due to low light.
+        val s = fullPass().copy(
+            layer2ChallengeScore = 0.9f,
+            layer3PulseDetected = false,
+            layer3BpmInRange = false,
+            layer3RppgConfidence = 0f,
+            layer4LbpScore = 0.9f,
+            layer4FourierScore = 0.9f,
+            layer5BehavioralScore = 0.9f,
+        )
+        val amb = AmbientConditions(
+            lowLightDetected = true, motionDetected = false, frontCameraConfirmed = true
+        )
+        val r = LivenessOrchestrator().orchestrate(
+            s, amb, hardwareAttestationVerified = true
+        )
+        assertEquals("pass", r.decision)
+        assertEquals("IAL2", r.assuranceLevel)
+    }
+
+    @Test
+    fun `layer3 booleans do not affect decision - only confidence does`() {
+        // Drift guard: the orchestrator reads confidence into the weighted
+        // sum but NEVER the two L3 booleans. A future refactor that starts
+        // hard-gating on pulseDetected or bpmInRange would break the server
+        // mirror (which also only scores confidence). Flip both flags
+        // across all four permutations with confidence fixed — decision
+        // must stay identical.
+        val baseline = fullPass()
+        val baseR = LivenessOrchestrator().orchestrate(
+            baseline, AmbientConditions(), hardwareAttestationVerified = true
+        )
+        for (pulse in listOf(true, false)) {
+            for (inRange in listOf(true, false)) {
+                val s = baseline.copy(
+                    layer3PulseDetected = pulse,
+                    layer3BpmInRange = inRange,
+                )
+                val r = LivenessOrchestrator().orchestrate(
+                    s, AmbientConditions(), hardwareAttestationVerified = true
+                )
+                assertEquals(
+                    baseR.decision, r.decision,
+                    "pulse=$pulse inRange=$inRange should not shift decision"
+                )
+                assertEquals(baseR.assuranceLevel, r.assuranceLevel)
+            }
+        }
+    }
+
     @Test
     fun `orchestrator does not emit IAL1`() {
         // Spec §1680: v1.0 orchestrator must never produce IAL1 — only

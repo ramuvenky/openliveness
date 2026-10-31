@@ -15,7 +15,16 @@ package dev.openliveness.layers
 class Layer2Runner(
     val sequencer: ChallengeSequencer,
     private val stream: LandmarkStream,
-    private val emit: ProcessingUpdateEmitter
+    /** Optional Layer-5 consumer driven off the same landmark stream. When
+     *  non-null, every frame is fed to [Layer5Behavioral.update] before the
+     *  sequencer runs — Layer 5 observes the entire capture, not just the
+     *  frames that fire a challenge event. Default null keeps the existing
+     *  Layer2Runner unit tests ergonomic (they don't need to construct a
+     *  Layer5 instance just to drive gesture logic). Placed before [emit]
+     *  so trailing-lambda call sites like `Layer2Runner(seq, stream) { .. }`
+     *  continue to bind the lambda to [emit]. */
+    private val layer5: Layer5Behavioral? = null,
+    private val emit: ProcessingUpdateEmitter,
 ) {
 
     companion object {
@@ -48,6 +57,10 @@ class Layer2Runner(
             val timestamp = frame.timestampSeconds
             if (firstTimestamp == null) firstTimestamp = timestamp
             lastTimestamp = timestamp
+            // Layer 5 sees every frame — including the ones the sequencer
+            // skips via `continue` below — so the 60-frame micro-movement
+            // window reflects the whole capture, not just event frames.
+            layer5?.update(frame.landmarks)
             val event = sequencer.update(frame.landmarks, timestamp) ?: continue
             when (event) {
                 is ChallengeEvent.StepCompleted -> {

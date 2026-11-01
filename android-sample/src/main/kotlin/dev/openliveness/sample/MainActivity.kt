@@ -22,7 +22,11 @@ import dev.openliveness.CDLSession
 import dev.openliveness.camera.CameraCapture
 import dev.openliveness.layers.MediaPipeLandmarkStream
 import dev.openliveness.parseQRPayload
+import dev.openliveness.sensors.AmbientConditionsSampler
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.floor
@@ -45,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var promptView: TextView
     private lateinit var statusView: TextView
+    private lateinit var ambientView: TextView
     private lateinit var qrInput: EditText
     private lateinit var startButton: Button
 
@@ -125,6 +130,36 @@ class MainActivity : AppCompatActivity() {
             )
         }
         root.addView(warningBanner)
+
+        // Live readout of AmbientConditionsSampler.snapshot() during a
+        // running session. The point of surfacing this is on-device
+        // validation: a developer can cover the light sensor or shake
+        // the phone and see the corresponding flag flip, confirming
+        // that the sensor path reaches the attestation builder before
+        // trusting a signed payload downstream. Hidden outside a
+        // running session so it doesn't advertise a stale read.
+        ambientView = TextView(this).apply {
+            text = ""
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(0x80, 0, 0, 0))
+            setPadding(24, 16, 24, 16)
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP,
+            ).also {
+                // Push below the warning banner so both are readable.
+                // The exact offset isn't load-bearing — the banner has
+                // WRAP_CONTENT height so a looser value works, but 128
+                // leaves a visible gap on the hardware we test on
+                // (Pixel 6 class) and still fits above the preview on
+                // small screens.
+                it.topMargin = 128
+            }
+        }
+        root.addView(ambientView)
 
         promptView = TextView(this).apply {
             text = ""
@@ -207,6 +242,13 @@ class MainActivity : AppCompatActivity() {
             // parseQRPayload threw after fromAsset had already returned.
             var stream: MediaPipeLandmarkStream? = null
             var capture: CameraCapture? = null
+            // Ambient sampler is constructed before CDLSession so the
+            // UI poller below can read snapshots from the same instance
+            // the session will consume. CDLSession owns start() / stop()
+            // — the double-start idempotency guard in the sampler means
+            // this is safe even if a future refactor pre-starts here.
+            val ambientSampler = AmbientConditionsSampler(applicationContext)
+            var ambientPoller: Job? = null
             val result = runCatching {
                 val payload = parseQRPayload(raw)
                 statusView.text = "Opening camera..."
@@ -246,6 +288,7 @@ class MainActivity : AppCompatActivity() {
                     context = applicationContext,
                     landmarkStream = stream,
                     allowStubMode = useStub,
+                    ambientSampler = ambientSampler,
                     onProgress = { progress, _ ->
                         // Camera coroutine delivers this on the IO
                         // dispatcher; hop to main before touching views.
@@ -254,8 +297,27 @@ class MainActivity : AppCompatActivity() {
                         }
                     },
                 )
+                // Live-poll the sampler's snapshot into the HUD while
+                // the session runs so a developer can confirm the
+                // low-light / motion flags flip on cue (cover the
+                // sensor, shake the device) BEFORE the attestation is
+                // signed. Session.start() owns the sampler's register /
+                // unregister lifecycle; the poller just reads the
+                // volatile fields and is thread-safe per snapshot()'s
+                // kdoc. 300 ms is a lazy cadence that's still perceptible
+                // to a human eye and doesn't flood the main thread.
+                ambientView.visibility = View.VISIBLE
+                ambientPoller = lifecycleScope.launch {
+                    while (isActive) {
+                        val a = ambientSampler.snapshot()
+                        ambientView.text = "low_light=${a.lowLightDetected}  motion=${a.motionDetected}"
+                        delay(300)
+                    }
+                }
                 withContext(Dispatchers.IO) { session.start() }
             }
+            ambientPoller?.cancel()
+            ambientView.visibility = View.GONE
             // Release the camera + MediaPipe resources regardless of
             // outcome. CDLSession.runLiveness closes `stream` already,
             // but owning the close here too makes the lifecycle robust

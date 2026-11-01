@@ -11,6 +11,7 @@ import dev.openliveness.layers.LandmarkStream
 import dev.openliveness.layers.Layer2Runner
 import dev.openliveness.layers.Layer3RPPG
 import dev.openliveness.layers.Layer5Behavioral
+import dev.openliveness.sensors.AmbientConditionsSampler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -75,6 +76,19 @@ class CDLSession(
      *  the relay can refuse `stub_mode: true` payloads from production
      *  session IDs. */
     private val allowStubMode: Boolean = false,
+    /** Optional ambient sampler. When non-null, [start] registers the
+     *  light + accelerometer listeners around the capture lifecycle and
+     *  the orchestrator reads real `low_light_detected` /
+     *  `motion_detected` flags from the device sensors. When null (the
+     *  default and pre-Phase-4 behavior), ambient flags stay at their
+     *  safe defaults (both false) so the orchestrator's ambient-aware
+     *  branches are inert — a known-conservative path kept for
+     *  harnesses that haven't opted in yet.
+     *
+     *  Threading: the sampler's `start()` / `stop()` + `snapshot()` are
+     *  all safe from any thread (see [AmbientConditionsSampler] kdoc),
+     *  so we don't need a dispatch hop. */
+    private val ambientSampler: AmbientConditionsSampler? = null,
     /** UI-side progress callback. Fired on every WS processing_update
      *  with the same (progress, currentLayer) pair the server sees, so
      *  the sample app's prompt overlay can advance in lockstep with the
@@ -101,48 +115,60 @@ class CDLSession(
     }
 
     suspend fun start(): RelayClient.CompleteResponse {
-        openWebSocket()
+        // Register sensors as early as possible so the first readings
+        // land well before `snapshot()` fires. The outer try/finally
+        // guarantees `.stop()` runs even if openWebSocket or
+        // waitForAcknowledgement throw — a session that fails mid-ack
+        // must not leak sensor registrations.
+        ambientSampler?.start()
         try {
-            waitForAcknowledgement()
+            openWebSocket()
+            try {
+                waitForAcknowledgement()
 
-            // M-4 / Phase 5 TODO: these are the default-constructed ambient
-            // flags (all false). The orchestrator's low-light / motion
-            // reweighting branches are therefore inert in Phase 3. Phase 5
-            // wires in the real ALS + accelerometer readings via
-            // AmbientConditionsSampler so the ambient-aware weights
-            // actually kick in — until then this is a known inert path,
-            // not a bug.
-            val ambient = AmbientConditions()
-            val (scores, challengeResult) = runLiveness(ambient)
-            // Pre-compute the decision once so the attestation payload and
-            // the signed assertion (future Phase 2+ platforms that need
-            // signed client data) stay in sync even if the decision function
-            // ever becomes non-deterministic.
-            val decision = if (challengeResult != null) {
-                LivenessOrchestrator().orchestrate(scores, ambient).decision
-            } else {
-                AttestationBuilder.stubLivenessDecision(scores)
+                // Phase 4 Step 8 — real ambient reading when a sampler
+                // was wired; falls back to the default-false
+                // AmbientConditions when the caller opted out. Snapshot
+                // happens AFTER waitForAcknowledgement so the sensors
+                // have had time to fire a first event tick during the
+                // WS handshake (TYPE_LIGHT @ SENSOR_DELAY_NORMAL fires
+                // every ~200ms; the handshake alone is usually enough).
+                // Taken just once per session — a 10-15s liveness run
+                // doesn't warrant re-sampling.
+                val ambient = ambientSampler?.snapshot() ?: AmbientConditions()
+                val (scores, challengeResult) = runLiveness(ambient)
+                // Pre-compute the decision once so the attestation payload and
+                // the signed assertion (future Phase 2+ platforms that need
+                // signed client data) stay in sync even if the decision function
+                // ever becomes non-deterministic.
+                val decision = if (challengeResult != null) {
+                    LivenessOrchestrator().orchestrate(scores, ambient).decision
+                } else {
+                    AttestationBuilder.stubLivenessDecision(scores)
+                }
+                val hw = requestDeviceAttestation()
+                // `challengeResult == null` is the signal that runLiveness fell
+                // back to the stub path (allowStubMode=true + no landmarkStream).
+                // Stamp the wire marker so the relay can enforce production
+                // policy — stub_mode=true outside allow-listed CI session IDs
+                // is a server-side rejection.
+                val attestation = AttestationBuilder.build(
+                    context = context,
+                    session = this,
+                    layerScores = scores,
+                    ambient = ambient,
+                    livenessDecision = decision,
+                    deviceAttestation = hw.token,
+                    hwAttestationStatus = hw.status,
+                    challengeResult = challengeResult,
+                    stubMode = (challengeResult == null),
+                )
+                return relay.submitAttestation(payload.session_id, attestation)
+            } finally {
+                closeWebSocket()
             }
-            val hw = requestDeviceAttestation()
-            // `challengeResult == null` is the signal that runLiveness fell
-            // back to the stub path (allowStubMode=true + no landmarkStream).
-            // Stamp the wire marker so the relay can enforce production
-            // policy — stub_mode=true outside allow-listed CI session IDs
-            // is a server-side rejection.
-            val attestation = AttestationBuilder.build(
-                context = context,
-                session = this,
-                layerScores = scores,
-                ambient = ambient,
-                livenessDecision = decision,
-                deviceAttestation = hw.token,
-                hwAttestationStatus = hw.status,
-                challengeResult = challengeResult,
-                stubMode = (challengeResult == null),
-            )
-            return relay.submitAttestation(payload.session_id, attestation)
         } finally {
-            closeWebSocket()
+            ambientSampler?.stop()
         }
     }
 

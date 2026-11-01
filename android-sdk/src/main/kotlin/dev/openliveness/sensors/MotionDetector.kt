@@ -4,6 +4,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Handler
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -13,14 +14,19 @@ import kotlin.math.sqrt
  */
 class MotionDetector(private val sensorManager: SensorManager) : SensorEventListener {
 
+    // @Volatile — see LightSensor.lowLightDetected for the reasoning.
+    @Volatile
     var motionDetected = false
         private set
 
     private val sensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-    fun start() {
+    /** See [LightSensor.start] for the `handler` contract. */
+    fun start(handler: Handler) {
         if (sensor != null) {
-            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)
+            sensorManager.registerListener(
+                this, sensor, SensorManager.SENSOR_DELAY_GAME, handler
+            )
         }
     }
 

@@ -48,6 +48,36 @@ android {
             buildConfigField("boolean", "STUB_PATH_ENABLED", "false")
         }
     }
+
+    // Defense-in-depth: pins the release value of STUB_PATH_ENABLED
+    // specifically. Fails Gradle configuration if a future edit ever
+    // flips STUB_PATH_ENABLED to anything other than literal "false" on
+    // the release build type. The runtime check in CDLSession.checkStubGate
+    // reads the SAME BuildConfig constant, so a reviewer who sees
+    // build.gradle.kts untouched can trust that CDLSession's gate still
+    // has `false` as its right-hand side at release time. This does NOT
+    // protect against unrelated tampering of CDLSession.kt (e.g.
+    // deleting the checkStubGate call site itself) — that's covered by
+    // normal code review of CDLSession.kt.
+    //
+    // Fires on EVERY Gradle invocation (not just assembleRelease) so an
+    // integrator who tries `./gradlew tasks` on a tampered checkout sees
+    // the failure immediately. The cost is one map lookup at config time.
+    afterEvaluate {
+        val releaseField = android.buildTypes.getByName("release").buildConfigFields["STUB_PATH_ENABLED"]
+            ?: throw GradleException(
+                "release build type must declare a STUB_PATH_ENABLED buildConfigField; " +
+                "a release AAR built without it would compile against a missing BuildConfig constant."
+            )
+        if (releaseField.value != "false") {
+            throw GradleException(
+                "release build must set STUB_PATH_ENABLED=\"false\", found \"${releaseField.value}\". " +
+                "Flipping this to true would ship a release AAR whose runtime stub gate (CDLSession.checkStubGate) " +
+                "accepts allowStubMode=true, which silently makes every liveness call pass. If you genuinely " +
+                "need the stub path in a debug flow, use the debug build type — do not relax the release gate."
+            )
+        }
+    }
     // Phase 2 drift tests touch AttestationBuilder which calls
     // Settings.Secure.getString(). In JVM unit tests android.* methods
     // throw by default; returnDefaultValues=true makes them return null

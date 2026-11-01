@@ -13,6 +13,7 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Production LandmarkStream backed by MediaPipe FaceLandmarker in
@@ -40,10 +41,40 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MediaPipeLandmarkStream private constructor(
     private val landmarker: FaceLandmarker,
     private val channel: Channel<LandmarkFrame>,
+    /** Optional Layer-3 RGB tap. When non-null, [analyze] computes
+     *  mean R/G/B across the three skin ROIs defined by
+     *  [SkinRegionExtractor] and forwards an [RGBSample] per frame.
+     *  Null (default) skips the extraction entirely so sessions that
+     *  never consume rPPG pay no per-frame bitmap-scan cost.
+     *
+     *  Exposed via [LandmarkStream.rgbSink] so [CDLSession] can verify
+     *  the Layer3RPPG it was handed is the SAME sink receiving frames,
+     *  not a drift-silent second instance. */
+    override val rgbSink: RGBSampleSink?,
+    /** Shared with the result listener so analyze() can read the most
+     *  recently detected landmarks for its RGB ROI math. One-frame lag
+     *  (<33ms at 30fps) is well below the pulse band Layer 3 operates
+     *  in (0.7-3 Hz → period 333-1430ms), so the lag doesn't degrade
+     *  signal; it just avoids buffering bitmaps keyed by timestamp. */
+    private val latestLandmarks: AtomicReference<FaceLandmarks?>,
+    /** Carried into [tapRgb] as [SkinRegionExtractor]'s `flipX` arg.
+     *  The channel ships MIRRORED landmarks (what Layer 2/5 consume),
+     *  but the pixel buffer is un-mirrored sensor-raw; the extractor
+     *  must un-flip the centroid x's for pixel ROIs to land on the
+     *  correct side of the bitmap. See kdoc on [tapRgb]. */
+    private val mirrorForFrontCamera: Boolean,
 ) : LandmarkStream, ImageAnalysis.Analyzer {
 
     private val gate = ClosableGate()
     private val timestamps = TimestampMonotonizer()
+
+    /** Reusable buffer for Bitmap.getPixels() — reallocated only if the
+     *  camera stream's resolution changes. The ARGB_8888 contract packs
+     *  each pixel into one int, so this is width*height ints (~1.2 MB
+     *  for 640x480, the CameraX ImageAnalysis default). Allocating
+     *  fresh per frame produced sustained GC pressure in the Layer2
+     *  profile — amortising keeps 30fps on mid-range devices. */
+    private var pixelsBuf: IntArray? = null
 
     override suspend fun nextFrame(): LandmarkFrame? =
         channel.receiveCatching().getOrNull()
@@ -59,6 +90,7 @@ class MediaPipeLandmarkStream private constructor(
                 // detectors' temporal resolution.
                 val tsMs = timestamps.advance(image.imageInfo.timestamp / 1_000_000L)
                 val bitmap = image.toBitmap()
+                tapRgb(bitmap, tsMs)
                 val mpImage = BitmapImageBuilder(bitmap).build()
                 // Rotation is handed to MediaPipe as metadata so we avoid a
                 // bitmap copy; the horizontal mirror is applied downstream
@@ -79,6 +111,59 @@ class MediaPipeLandmarkStream private constructor(
         } finally {
             image.close()
         }
+    }
+
+    /**
+     * Pull the current frame's pixels into [pixelsBuf], run the skin-
+     * region extractor against the most-recently-detected landmarks,
+     * and forward an [RGBSample] to [rgbSink]. No-ops when the sink is
+     * null, no face has been detected yet, or the extractor returns
+     * null (face off-frame, zero face width, etc.). Short-circuits
+     * before `getPixels` to avoid the bitmap copy when there's no sink.
+     *
+     * **Mirror handling**: the horizontal flip we apply to landmarks
+     * (`x → 1 - x`, see `faceLandmarksFromXYZ`) means the stored
+     * landmark x-coords are in the already-mirrored frame of reference.
+     * The pixel buffer is NOT mirrored — we read directly from the raw
+     * sensor stream. We flip the landmark x's back here before
+     * computing pixel ROIs so the ROI lands on the correct side of the
+     * sensor-raw bitmap. Doing the un-flip at this one site keeps the
+     * ratio-based Layer-2 detectors insulated from the physical
+     * orientation of the bitmap.
+     */
+    private fun tapRgb(bitmap: android.graphics.Bitmap, tsMs: Long) {
+        val sink = rgbSink ?: return
+        val landmarks = latestLandmarks.get() ?: return
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return
+        val need = w * h
+        // Reallocate when (a) no buffer yet, (b) too small for the
+        // current frame, OR (c) the current buffer is more than 2× the
+        // frame area — a camera that briefly bumped to 4K preview and
+        // then dropped back to 480p would otherwise retain a ~8 MB
+        // IntArray indefinitely. 2× hysteresis keeps us from thrashing
+        // on normal small variations.
+        val existing = pixelsBuf
+        val buf = if (existing == null || existing.size < need || existing.size > need * 2) {
+            IntArray(need).also { pixelsBuf = it }
+        } else {
+            existing
+        }
+        bitmap.getPixels(buf, 0, w, 0, 0, w, h)
+        val rgb = SkinRegionExtractor.meanSkinRgb(
+            pixels = buf,
+            width = w,
+            height = h,
+            landmarks = landmarks,
+            flipX = mirrorForFrontCamera,
+        ) ?: return
+        sink.onSample(RGBSample(
+            red = rgb[0],
+            green = rgb[1],
+            blue = rgb[2],
+            timestampSeconds = tsMs / 1000.0,
+        ))
     }
 
     override fun close() = closeInternal()
@@ -127,6 +212,7 @@ class MediaPipeLandmarkStream private constructor(
             mirrorForFrontCamera: Boolean,
             expectedSha256: String? = null,
             numFaces: Int = 1,
+            rgbSink: RGBSampleSink? = null,
         ): MediaPipeLandmarkStream {
             if (expectedSha256 != null) {
                 val bytes = context.assets.open(modelAssetPath).use { it.readBytes() }
@@ -137,7 +223,7 @@ class MediaPipeLandmarkStream private constructor(
             val baseOptions = BaseOptions.builder()
                 .setModelAssetPath(modelAssetPath)
                 .build()
-            return fromBaseOptions(context, baseOptions, mirrorForFrontCamera, numFaces)
+            return fromBaseOptions(context, baseOptions, mirrorForFrontCamera, numFaces, rgbSink)
         }
 
         /**
@@ -150,12 +236,14 @@ class MediaPipeLandmarkStream private constructor(
             baseOptions: BaseOptions,
             mirrorForFrontCamera: Boolean,
             numFaces: Int = 1,
+            rgbSink: RGBSampleSink? = null,
         ): MediaPipeLandmarkStream {
             val channel = Channel<LandmarkFrame>(
                 capacity = CHANNEL_CAPACITY,
                 onBufferOverflow = BufferOverflow.DROP_OLDEST,
             )
             val dropLogged = AtomicBoolean(false)
+            val latestLandmarks = AtomicReference<FaceLandmarks?>(null)
             // Capture-before-use: setResultListener fires on MediaPipe's
             // own thread, so we can't close over `this` from the Builder
             // chain — we route the result through the channel instead,
@@ -167,6 +255,10 @@ class MediaPipeLandmarkStream private constructor(
                 .setResultListener { result, _ ->
                     val frame = toLandmarkFrame(result, mirrorForFrontCamera)
                         ?: return@setResultListener
+                    // Publish BEFORE channel send so an analyze() racing
+                    // on another thread sees landmarks no older than this
+                    // frame — the staleness bound stays at 1 frame.
+                    latestLandmarks.set(frame.landmarks)
                     val sendResult = channel.trySend(frame)
                     // trySend can fail if the channel is closed (shutting
                     // down) or — with DROP_OLDEST — never for buffer-full,
@@ -197,7 +289,13 @@ class MediaPipeLandmarkStream private constructor(
                 channel.close()
                 throw t
             }
-            return MediaPipeLandmarkStream(landmarker, channel)
+            return MediaPipeLandmarkStream(
+                landmarker = landmarker,
+                channel = channel,
+                rgbSink = rgbSink,
+                latestLandmarks = latestLandmarks,
+                mirrorForFrontCamera = mirrorForFrontCamera,
+            )
         }
 
         /**

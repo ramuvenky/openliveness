@@ -165,13 +165,29 @@ jobs:
       # before archiving. A Release-only compile-flag divergence (which
       # is EXACTLY the C-2 regression this review added a test for) now
       # fails CI before we ship broken code to internal testers.
+      #
+      # `ENABLE_TESTABILITY=YES` is required because the test targets use
+      # `@testable import OpenLiveness`. In Debug it defaults to YES; in
+      # Release it defaults to NO, so without this override the build
+      # fails with "Module 'OpenLiveness' was not compiled for testing".
+      # Only the test-time build gets testability — the archive step below
+      # still produces a clean Release binary with no testability hooks.
+      #
+      # `-skip-testing:OpenLivenessIntegrationTests` mirrors the ios.yml
+      # unit-tests split. The integration suite talks to the Python stub-
+      # relay (not started here) and passes `allowStubMode: true`
+      # explicitly, so it exercises neither the Release stub-gate nor any
+      # Release-only code — compiling it just costs CI time with zero
+      # added coverage.
       - name: Test OpenLiveness SDK (Release config)
         working-directory: ios-sdk
         run: |
           xcodebuild test \
             -scheme OpenLiveness \
             -configuration Release \
-            -destination "platform=iOS Simulator,id=$SIM_UDID"
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
+            -skip-testing:OpenLivenessIntegrationTests \
+            ENABLE_TESTABILITY=YES
 
       - name: Install App Store Connect API key
         # The private key arrives as base64 in a secret because

@@ -1,0 +1,274 @@
+{
+  "cases": [
+    {
+      "expected": {
+        "assurance_level": "software_only",
+        "decision": "pass",
+        "weighted_score": 0.845,
+        "weights_applied": {
+          "layer2": 0.3,
+          "layer3": 0.25,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.1
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": false,
+          "motion_detected": false
+        },
+        "hardware_attestation_verified": false,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.8,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.85,
+          "layer5_behavioral_score": 0.7
+        }
+      },
+      "name": "ll=False,motion=False,hw=False"
+    },
+    {
+      "expected": {
+        "assurance_level": "IAL2",
+        "decision": "pass",
+        "weighted_score": 0.845,
+        "weights_applied": {
+          "layer2": 0.3,
+          "layer3": 0.25,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.1
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": false,
+          "motion_detected": false
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.8,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.85,
+          "layer5_behavioral_score": 0.7
+        }
+      },
+      "name": "ll=False,motion=False,hw=True"
+    },
+    {
+      "expected": {
+        "assurance_level": "software_only",
+        "decision": "pass",
+        "weighted_score": 0.8500000000000001,
+        "weights_applied": {
+          "layer2": 0.3,
+          "layer3": 0.3,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.05
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": false,
+          "motion_detected": true
+        },
+        "hardware_attestation_verified": false,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.8,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.85,
+          "layer5_behavioral_score": 0.7
+        }
+      },
+      "name": "ll=False,motion=True,hw=False"
+    },
+    {
+      "expected": {
+        "assurance_level": "IAL2",
+        "decision": "pass",
+        "weighted_score": 0.8500000000000001,
+        "weights_applied": {
+          "layer2": 0.3,
+          "layer3": 0.3,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.05
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": false,
+          "motion_detected": true
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.8,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.85,
+          "layer5_behavioral_score": 0.7
+        }
+      },
+      "name": "ll=False,motion=True,hw=True"
+    },
+    {
+      "expected": {
+        "assurance_level": "software_only",
+        "decision": "pass",
+        "weighted_score": 0.845,
+        "weights_applied": {
+          "layer2": 0.35,
+          "layer3": 0.15,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.15
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": true,
+          "motion_detected": false
+        },
+        "hardware_attestation_verified": false,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.8,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.85,
+          "layer5_behavioral_score": 0.7
+        }
+      },
+      "name": "ll=True,motion=False,hw=False"
+    },
+    {
+      "expected": {
+        "assurance_level": "IAL2",
+        "decision": "pass",
+        "weighted_score": 0.845,
+        "weights_applied": {
+          "layer2": 0.35,
+          "layer3": 0.15,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.15
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": true,
+          "motion_detected": false
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.8,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.85,
+          "layer5_behavioral_score": 0.7
+        }
+      },
+      "name": "ll=True,motion=False,hw=True"
+    },
+    {
+      "expected": {
+        "assurance_level": "software_only",
+        "decision": "pass",
+        "weighted_score": 0.8550000000000001,
+        "weights_applied": {
+          "layer2": 0.35,
+          "layer3": 0.25,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.05
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": true,
+          "motion_detected": true
+        },
+        "hardware_attestation_verified": false,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.8,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.85,
+          "layer5_behavioral_score": 0.7
+        }
+      },
+      "name": "ll=True,motion=True,hw=False"
+    },
+    {
+      "expected": {
+        "assurance_level": "IAL2",
+        "decision": "pass",
+        "weighted_score": 0.8550000000000001,
+        "weights_applied": {
+          "layer2": 0.35,
+          "layer3": 0.25,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.05
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": true,
+          "motion_detected": true
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.8,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.85,
+          "layer5_behavioral_score": 0.7
+        }
+      },
+      "name": "ll=True,motion=True,hw=True"
+    },
+    {
+      "expected": {
+        "assurance_level": "software_only",
+        "decision": "fail",
+        "weighted_score": 0.0,
+        "weights_applied": {
+          "layer2": 0.3,
+          "layer3": 0.25,
+          "layer4_fourier": 0.15,
+          "layer4_lbp": 0.2,
+          "layer5": 0.1
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": false,
+          "motion_detected": false
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": false,
+          "layer2_challenge_score": 0.0,
+          "layer3_rppg_confidence": 0.9,
+          "layer4_fourier_score": 0.9,
+          "layer4_lbp_score": 0.9,
+          "layer5_behavioral_score": 0.9
+        }
+      },
+      "name": "challenge_missed_hard_fail"
+    }
+  ]
+}

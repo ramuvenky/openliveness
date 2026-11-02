@@ -171,8 +171,10 @@ in any legal or technical sense.
 
 - [Full Technical Specification](docs/spec.md) — complete implementation guide (28 sections)
 - [Project Background](docs/background.md) — why this exists, what problem it solves
-- [Threat Model](protocol/threat-model.md) — what this protects against and what it does not
-- [Attestation Schema](protocol/attestation-schema.json) — the shared interface contract
+- [Threat Model](protocol/ThreatModel.md) — what this protects against and what it does not
+- [Attestation Schema](protocol/AttestationSchema.json) — the shared interface contract
+- [Contributing](CONTRIBUTING.md) — how to help, with iOS SDK as the highest-value onramp
+- [Security](SECURITY.md) — how to report vulnerabilities privately
 
 ---
 

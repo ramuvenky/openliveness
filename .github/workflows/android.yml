@@ -93,7 +93,17 @@ jobs:
           arch: x86_64
           profile: pixel_6
           working-directory: android-sdk
-          script: ./gradlew connectedDebugAndroidTest --stacktrace
+          # adb reverse so the AVD's `localhost:8787` reaches the host-side
+          # stub-relay started in the previous step. Without this, the
+          # fullFlowAgainstStubRelay test fails with ConnectException —
+          # AVD's localhost is the AVD's own loopback, not the host's.
+          # Equivalent to the USB-device setup documented in
+          # CDLSessionE2ETest.kt. Previously the test used 10.0.2.2 which
+          # only worked on emulator; switching to localhost + reverse
+          # makes it portable across emulator and USB device.
+          script: |
+            adb reverse tcp:8787 tcp:8787
+            ./gradlew connectedDebugAndroidTest --stacktrace
 
       - name: Upload instrumented test reports on failure
         if: failure()

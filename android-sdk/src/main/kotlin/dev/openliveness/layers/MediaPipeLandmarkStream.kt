@@ -63,6 +63,11 @@ class MediaPipeLandmarkStream private constructor(
      *  must un-flip the centroid x's for pixel ROIs to land on the
      *  correct side of the bitmap. See kdoc on [tapRgb]. */
     private val mirrorForFrontCamera: Boolean,
+    /** Optional Layer-4 face-crop tap. When non-null, [analyze] extracts
+     *  an 80×80 grayscale face crop at [FACE_CROP_INTERVAL_MS] cadence
+     *  and forwards it. Null (default) skips the extraction entirely
+     *  so sessions that haven't adopted Layer 4 pay no per-frame cost. */
+    override val faceCropSink: FaceCropSink?,
 ) : LandmarkStream, ImageAnalysis.Analyzer {
 
     private val gate = ClosableGate()
@@ -75,6 +80,16 @@ class MediaPipeLandmarkStream private constructor(
      *  fresh per frame produced sustained GC pressure in the Layer2
      *  profile — amortising keeps 30fps on mid-range devices. */
     private var pixelsBuf: IntArray? = null
+
+    /** Timestamp (ms, same clock as the one driving [analyze]) at which
+     *  the last 80×80 crop was handed to [faceCropSink]. Layer 4 is a
+     *  static-image classifier — feeding it at the camera's 30 fps would
+     *  burn battery with no signal gain, so [tapFaceCrop] rate-limits to
+     *  one call per [FACE_CROP_INTERVAL_MS]. @Volatile because the field
+     *  is written on the analyzer executor and may be read by debug/
+     *  observability code on another thread. */
+    @Volatile
+    private var lastFaceCropMs: Long = 0L
 
     override suspend fun nextFrame(): LandmarkFrame? =
         channel.receiveCatching().getOrNull()
@@ -91,6 +106,7 @@ class MediaPipeLandmarkStream private constructor(
                 val tsMs = timestamps.advance(image.imageInfo.timestamp / 1_000_000L)
                 val bitmap = image.toBitmap()
                 tapRgb(bitmap, tsMs)
+                tapFaceCrop(bitmap, tsMs)
                 val mpImage = BitmapImageBuilder(bitmap).build()
                 // Rotation is handed to MediaPipe as metadata so we avoid a
                 // bitmap copy; the horizontal mirror is applied downstream
@@ -166,6 +182,54 @@ class MediaPipeLandmarkStream private constructor(
         ))
     }
 
+    /**
+     * Rate-limited counterpart to [tapRgb]: extracts an 80×80 grayscale
+     * face crop and forwards it to [faceCropSink]. No-ops when the sink
+     * is null, no face has been detected yet, we're inside the
+     * [FACE_CROP_INTERVAL_MS] cooldown, or the extractor returns null
+     * (face off-frame). Short-circuits before `getPixels` on all three
+     * paths so a session without a Layer-4 wire-up pays nothing per
+     * frame beyond one field read + one subtract.
+     *
+     * **Why re-read pixels when [tapRgb] already did**: writing a
+     * second `getPixels(buf, …)` call here keeps the two taps
+     * independent — a session that opts into Layer 4 but not Layer 3,
+     * or vice versa, still works unchanged. The 1 Hz cadence means the
+     * extra copy fires ~once per 30 analyzed frames; the fused cost is
+     * dwarfed by MediaPipe's own per-frame mesh inference.
+     *
+     * **Mirror handling**: same convention as [tapRgb] — landmarks are
+     * stored mirrored, bitmap is sensor-raw, [FaceCropExtractor] un-flips
+     * x in landmark space before computing the pixel bbox.
+     */
+    private fun tapFaceCrop(bitmap: android.graphics.Bitmap, tsMs: Long) {
+        val sink = faceCropSink ?: return
+        if (tsMs - lastFaceCropMs < FACE_CROP_INTERVAL_MS) return
+        val landmarks = latestLandmarks.get() ?: return
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return
+        val need = w * h
+        val existing = pixelsBuf
+        val buf = if (existing == null || existing.size < need || existing.size > need * 2) {
+            IntArray(need).also { pixelsBuf = it }
+        } else {
+            existing
+        }
+        bitmap.getPixels(buf, 0, w, 0, 0, w, h)
+        val gray = FaceCropExtractor.extractGrayFaceCrop(
+            pixels = buf,
+            width = w,
+            height = h,
+            landmarks = landmarks,
+            flipX = mirrorForFrontCamera,
+        ) ?: return
+        // Set *after* a successful extraction so a transient face-lost
+        // frame doesn't reset the clock and skip the next good frame.
+        lastFaceCropMs = tsMs
+        sink.onFrame(gray, FaceCropExtractor.OUT_SIZE)
+    }
+
     override fun close() = closeInternal()
 
     private fun closeInternal() {
@@ -186,6 +250,21 @@ class MediaPipeLandmarkStream private constructor(
          * growing if the sequencer stalls while MediaPipe keeps producing.
          */
         private const val CHANNEL_CAPACITY = 16
+
+        /**
+         * Minimum interval between face-crop sink calls, in milliseconds.
+         * Layer 4 is a static-image classifier evaluated once per frame
+         * handed in — pushing it at the full camera rate (~30 fps) would
+         * waste cycles since the LBP + Dense output is dominated by
+         * texture statistics that change far slower than that.
+         *
+         * 1000 ms matches the "~1 Hz in production" note in
+         * [FaceCropSink]'s threading docs and roughly tracks the
+         * CDL challenge beat (each turn/blink step averages ~2 s), so
+         * every challenge window produces 1-2 fresh scores to feed into
+         * the final attestation.
+         */
+        const val FACE_CROP_INTERVAL_MS: Long = 1000L
 
         /**
          * Build a stream from a model file bundled in the app's assets.
@@ -213,6 +292,7 @@ class MediaPipeLandmarkStream private constructor(
             expectedSha256: String? = null,
             numFaces: Int = 1,
             rgbSink: RGBSampleSink? = null,
+            faceCropSink: FaceCropSink? = null,
         ): MediaPipeLandmarkStream {
             if (expectedSha256 != null) {
                 val bytes = context.assets.open(modelAssetPath).use { it.readBytes() }
@@ -223,7 +303,14 @@ class MediaPipeLandmarkStream private constructor(
             val baseOptions = BaseOptions.builder()
                 .setModelAssetPath(modelAssetPath)
                 .build()
-            return fromBaseOptions(context, baseOptions, mirrorForFrontCamera, numFaces, rgbSink)
+            return fromBaseOptions(
+                context = context,
+                baseOptions = baseOptions,
+                mirrorForFrontCamera = mirrorForFrontCamera,
+                numFaces = numFaces,
+                rgbSink = rgbSink,
+                faceCropSink = faceCropSink,
+            )
         }
 
         /**
@@ -237,6 +324,7 @@ class MediaPipeLandmarkStream private constructor(
             mirrorForFrontCamera: Boolean,
             numFaces: Int = 1,
             rgbSink: RGBSampleSink? = null,
+            faceCropSink: FaceCropSink? = null,
         ): MediaPipeLandmarkStream {
             val channel = Channel<LandmarkFrame>(
                 capacity = CHANNEL_CAPACITY,
@@ -295,6 +383,7 @@ class MediaPipeLandmarkStream private constructor(
                 rgbSink = rgbSink,
                 latestLandmarks = latestLandmarks,
                 mirrorForFrontCamera = mirrorForFrontCamera,
+                faceCropSink = faceCropSink,
             )
         }
 

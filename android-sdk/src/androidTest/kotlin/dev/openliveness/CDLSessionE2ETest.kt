@@ -32,6 +32,13 @@ class CDLSessionE2ETest {
         mockRelay = null
     }
 
+    /// Preconditions on the host (both emulator and USB device):
+    ///   1. `python tools/stub-relay/server.py` running on 127.0.0.1:8787.
+    ///   2. `adb reverse tcp:8787 tcp:8787` so the device's `localhost`
+    ///      reaches the host port. Works for both AVD (emulator-5554)
+    ///      and USB (serial-id). The older address `10.0.2.2` only
+    ///      resolves to host loopback on the emulator — using `localhost`
+    ///      + reverse-port keeps the test portable.
     @Test
     fun fullFlowAgainstStubRelay() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -40,8 +47,8 @@ class CDLSessionE2ETest {
             session_id = sessionId,
             challenge_id = "ch-1",
             challenge_sequence = listOf("blink", "turn_left"),
-            relay_ws = "ws://10.0.2.2:8787/cdl/session/$sessionId/ws",
-            relay_http = "http://10.0.2.2:8787",
+            relay_ws = "ws://localhost:8787/cdl/session/$sessionId/ws",
+            relay_http = "http://localhost:8787",
             expires_at = "2099-01-01T00:00:00Z",
             version = "1.0"
         )
@@ -137,6 +144,41 @@ class CDLSessionE2ETest {
         assertTrue(
             "expected stub-gate message, got: ${ex.message}",
             ex.message!!.contains("stub liveness path is disabled")
+        )
+    }
+
+    /// Regression: when the WS handshake gets back a non-101 HTTP reply
+    /// (relay misroute, bad path in the QR, auth proxy in front, ...),
+    /// the CDLException must surface the HTTP status code so the
+    /// integrator can tell "I pointed at the wrong path" apart from
+    /// "the server is down". Before the fix the message was just
+    /// "unexpected end of stream" — unactionable.
+    @Test
+    fun startSurfacesHttpStatusWhenWebSocketUpgradeIsRejected() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val server = MockWebServer().also { mockRelay = it }
+        // Plain 404 (no withWebSocketUpgrade) — okhttp's WS client sees
+        // "expected 101, got 404" and triggers onFailure with a non-null
+        // Response holding the code.
+        server.enqueue(MockResponse().setResponseCode(404))
+        server.start()
+        val wsUrl = server.url("/cdl/session/x/ws").toString().replaceFirst("http", "ws")
+        val payload = QRPayload(
+            session_id = "x",
+            challenge_id = "c",
+            challenge_sequence = listOf("blink"),
+            relay_ws = wsUrl,
+            relay_http = server.url("/").toString().trimEnd('/'),
+            expires_at = "2099-01-01T00:00:00Z",
+            version = "1.0"
+        )
+
+        val ex = assertThrows(CDLException::class.java) {
+            runBlocking { CDLSession(payload, context, allowStubMode = true).start() }
+        }
+        assertTrue(
+            "expected HTTP 404 in message, got: ${ex.message}",
+            ex.message!!.contains("HTTP 404")
         )
     }
 

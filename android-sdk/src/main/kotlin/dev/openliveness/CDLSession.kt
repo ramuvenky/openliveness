@@ -10,6 +10,7 @@ import dev.openliveness.layers.ChallengeSequencer
 import dev.openliveness.layers.LandmarkStream
 import dev.openliveness.layers.Layer2Runner
 import dev.openliveness.layers.Layer3RPPG
+import dev.openliveness.layers.Layer4Texture
 import dev.openliveness.layers.Layer5Behavioral
 import dev.openliveness.sensors.AmbientConditionsSampler
 import kotlinx.coroutines.CancellationException
@@ -65,6 +66,27 @@ class CDLSession(
      *  falling back to the optimistic stub — once an integrator opts in,
      *  the honest-failure path is the one the server expects. */
     private val layer3: Layer3RPPG? = null,
+    /** Optional Layer-4 texture analyser. The integrator constructs this
+     *  alongside [landmarkStream] with a loaded [dev.openliveness.layers.TextureClassifier]
+     *  and wires it as the stream's `faceCropSink` (see
+     *  MediaPipeLandmarkStream.fromAsset's `faceCropSink` arg) so per-
+     *  frame 80×80 grayscale crops flow into it during
+     *  Layer2Runner.run(); [start] then reads [Layer4Texture.lbpScore] +
+     *  [Layer4Texture.fourierScore] at session end and folds them into
+     *  layerScores — replacing the historical 0.85 stub.
+     *
+     *  **Same drift-prevention story as [layer3]**: the init-time
+     *  [checkLayer4Wiring] enforces that the instance passed here is
+     *  the same reference the stream forwards crops to. Previously an
+     *  integrator could construct two Layer4Texture objects (one for the
+     *  stream, one for CDLSession) and the attestation would always
+     *  report the untouched 0.85 stub.
+     *
+     *  When null (default), the Layer-4 stub scores from
+     *  [AttestationBuilder.stubLayerScores] stay in place — preserves
+     *  the pre-Phase-5 behavior for harnesses that haven't adopted the
+     *  TFLite texture model yet. */
+    private val layer4: Layer4Texture? = null,
     /** Escape hatch for the Phase-1 stub liveness path. Default `false`
      *  so a production integrator who forgets to inject a [landmarkStream]
      *  gets a loud CDLException at `start()` rather than silently shipping
@@ -112,6 +134,7 @@ class CDLSession(
     init {
         checkStubGate(allowStubMode, BuildConfig.STUB_PATH_ENABLED)
         checkLayer3Wiring(layer3, landmarkStream)
+        checkLayer4Wiring(layer4, landmarkStream)
     }
 
     suspend fun start(): RelayClient.CompleteResponse {
@@ -244,10 +267,21 @@ class CDLSession(
         // null-signal failure path (0 confidence, false flags). Without a
         // wiring we leave the stub values untouched so pre-Phase-4
         // harnesses see unchanged behavior.
-        val scores = if (layer3 == null) base else base.copy(
+        val withLayer3 = if (layer3 == null) base else base.copy(
             layer3PulseDetected = layer3Result?.pulseDetected == true,
             layer3BpmInRange = layer3Result?.bpmInRange == true,
             layer3RppgConfidence = layer3Result?.confidence ?: 0f,
+        )
+        // Phase 5 Step 3 — publish real Layer-4 scores when the integrator
+        // wired a Layer4Texture. The Layer4Texture fields default to the
+        // 0.85 stub, so a session that produced zero face-crop callbacks
+        // (face never visible, flow aborted before the first interval)
+        // still reports a neutral score here rather than throwing — the
+        // Layer-2 completion flag already encodes "did the user actually
+        // show up". Without a wiring we leave the stub values untouched.
+        val scores = if (layer4 == null) withLayer3 else withLayer3.copy(
+            layer4LbpScore = layer4.lbpScore,
+            layer4FourierScore = layer4.fourierScore,
         )
         return scores to result
     }
@@ -363,7 +397,18 @@ class CDLSession(
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                failIfPending(CDLException("WebSocket failure: ${t.message}"))
+                // okhttp passes a non-null `response` when the handshake
+                // got an HTTP reply that wasn't a valid 101 upgrade (404,
+                // 403, 500, ...). Surface the code + reason so a payload
+                // pointing at the wrong WS path doesn't produce an
+                // opaque "unexpected end of stream" — the actual HTTP
+                // status is what tells the integrator which end to fix.
+                val detail = if (response != null) {
+                    "HTTP ${response.code} ${response.message}"
+                } else {
+                    "${t.javaClass.simpleName}: ${t.message ?: "no message"}"
+                }
+                failIfPending(CDLException("WebSocket failure ($detail)"))
             }
 
             private fun failIfPending(e: CDLException) {
@@ -463,6 +508,38 @@ class CDLSession(
                     "(got layer3=$layer3, stream.rgbSink=$sink). Pass the Layer3RPPG " +
                     "into both MediaPipeLandmarkStream.fromAsset(rgbSink = ...) and " +
                     "CDLSession(layer3 = ...) — a mismatch would silently route samples " +
+                    "to one instance and read scores from the other."
+                )
+            }
+        }
+
+        /**
+         * Pre-run wiring check for the Phase-5 Layer-4 injection — exact
+         * same footgun story as [checkLayer3Wiring], one tier down the
+         * stack. Pre-fix: an integrator could instantiate
+         * `Layer4Texture(classifier)` twice (once as the stream's
+         * `faceCropSink`, once as `CDLSession(layer4 = …)`), the stream
+         * would feed crops to the first and the attestation would read
+         * scores off the second — which never saw a frame and therefore
+         * reported the 0.85 stub forever. Attackers prize exactly this
+         * class of silent-pass-through bug. The reference-equality
+         * assertion converts it to a construction-time error.
+         *
+         * Null layer4 / null stream are both still legal (pre-Phase-5
+         * harnesses and the Phase-1 stub path respectively). Only the
+         * combination "layer4 non-null AND stream non-null AND
+         * stream.faceCropSink !== layer4" is the bug.
+         */
+        @JvmStatic
+        internal fun checkLayer4Wiring(layer4: Layer4Texture?, stream: LandmarkStream?) {
+            if (layer4 == null || stream == null) return
+            val sink = stream.faceCropSink
+            if (sink !== layer4) {
+                throw IllegalArgumentException(
+                    "layer4 must be the SAME instance as landmarkStream.faceCropSink " +
+                    "(got layer4=$layer4, stream.faceCropSink=$sink). Pass the Layer4Texture " +
+                    "into both MediaPipeLandmarkStream.fromAsset(faceCropSink = ...) and " +
+                    "CDLSession(layer4 = ...) — a mismatch would silently route crops " +
                     "to one instance and read scores from the other."
                 )
             }

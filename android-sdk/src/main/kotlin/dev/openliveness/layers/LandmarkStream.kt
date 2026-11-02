@@ -37,6 +37,15 @@ interface LandmarkStream {
      * ever drifted.
      */
     val rgbSink: RGBSampleSink? get() = null
+
+    /**
+     * The face-crop sink this stream forwards per-frame 80×80 grayscale
+     * crops to, if any. Same drift-prevention story as [rgbSink]:
+     * [CDLSession] uses the identity of this reference to verify the
+     * [Layer4Texture] it was handed is the one receiving crops. Default
+     * `null` so pre-Phase-5 fakes and harnesses compile unchanged.
+     */
+    val faceCropSink: FaceCropSink? get() = null
 }
 
 /**

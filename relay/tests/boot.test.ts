@@ -48,6 +48,10 @@ describe('M5 — buildServer production + stub refusal', () => {
     process.env.NODE_ENV = 'production';
     process.env.HARDWARE_ATTESTATION = 'enforce';
     process.env.INTEGRITY_NONCE_SECRET = 'strong-rotated-' + 'a'.repeat(32);
+    // Set a well-formed CORS allowlist so the registerSecurity boot guard
+    // doesn't fire — this test is scoped to the M5 stub refusal, not the
+    // separately-covered ALLOWED_ORIGINS guard (see O-a below).
+    process.env.ALLOWED_ORIGINS = 'https://bank.example.com';
     // registerSecurity + the other plugins don't need live Redis to .ready(),
     // but we only care that the guard does not fire — so just build and close.
     const app = await buildServer();
@@ -116,6 +120,64 @@ describe('N-e — INTEGRITY_NONCE_SECRET weak-value refusal in production', () =
     process.env.NODE_ENV = 'production';
     process.env.HARDWARE_ATTESTATION = 'enforce';
     process.env.INTEGRITY_NONCE_SECRET = 'a3f8e7c21b4d5a90f2e8c17b4a9d8e2f1c6b5a908f7e6d5c4b3a291807e6d5c4';
+    // Set a well-formed CORS allowlist so the registerSecurity boot guard
+    // doesn't fire — this test is scoped to the nonce-secret path, not the
+    // separately-covered ALLOWED_ORIGINS guard (see O-a below).
+    process.env.ALLOWED_ORIGINS = 'https://bank.example.com';
+    const app = await buildServer();
+    try {
+      expect(app).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// O-a — browser-facing endpoints (/cdl/session/initiate, /status, /ws) are
+// called from the relying party's page, which is cross-origin to the relay
+// in every deployment model except "same-host reverse proxy". The registerSecurity
+// plugin refuses to boot in production when ALLOWED_ORIGINS is empty — a prod
+// relay with no RP origins is a deployment mistake, not a safety win (the
+// RP's /verify-liveness call runs through their own backend, not the browser
+// → relay path CORS gates). The ALLOWED_ORIGINS boot refusal is the only
+// thing that stops an operator from shipping a prod relay whose browser
+// clients will see "blocked by CORS" errors with no server-side signal.
+describe('O-a — ALLOWED_ORIGINS refusal in production', () => {
+  it('refuses to boot when NODE_ENV=production and ALLOWED_ORIGINS is unset', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.HARDWARE_ATTESTATION = 'enforce';
+    process.env.INTEGRITY_NONCE_SECRET = 'a3f8e7c21b4d5a90f2e8c17b4a9d8e2f1c6b5a908f7e6d5c4b3a291807e6d5c4';
+    delete process.env.ALLOWED_ORIGINS;
+    await expect(buildServer()).rejects.toThrow(/ALLOWED_ORIGINS/);
+  });
+
+  it('refuses to boot when NODE_ENV=production and ALLOWED_ORIGINS is the empty string', async () => {
+    // Explicit-empty is a common operator mistake (leaving the .env line
+    // but not filling it in). Must behave the same as "unset".
+    process.env.NODE_ENV = 'production';
+    process.env.HARDWARE_ATTESTATION = 'enforce';
+    process.env.INTEGRITY_NONCE_SECRET = 'a3f8e7c21b4d5a90f2e8c17b4a9d8e2f1c6b5a908f7e6d5c4b3a291807e6d5c4';
+    process.env.ALLOWED_ORIGINS = '';
+    await expect(buildServer()).rejects.toThrow(/ALLOWED_ORIGINS/);
+  });
+
+  it('tolerates an unset ALLOWED_ORIGINS in development (dev default is localhost:4000)', async () => {
+    process.env.NODE_ENV = 'development';
+    process.env.HARDWARE_ATTESTATION = 'stub';
+    delete process.env.ALLOWED_ORIGINS;
+    const app = await buildServer();
+    try {
+      expect(app).toBeDefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('boots in production when ALLOWED_ORIGINS lists at least one origin', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.HARDWARE_ATTESTATION = 'enforce';
+    process.env.INTEGRITY_NONCE_SECRET = 'a3f8e7c21b4d5a90f2e8c17b4a9d8e2f1c6b5a908f7e6d5c4b3a291807e6d5c4';
+    process.env.ALLOWED_ORIGINS = 'https://bank.example.com,https://kyc.example.com';
     const app = await buildServer();
     try {
       expect(app).toBeDefined();

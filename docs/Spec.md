@@ -764,12 +764,15 @@ Response: { "device_token": "opaque string" }
 
 Response: `{ "nonce": "base64url string" }`
 
-The phone requests this nonce *before* liveness runs (so it can present the
-Play Integrity token alongside the final attestation), so `liveness_decision`
-is deliberately **not** part of the nonce. The decision is still cryptographically
-bound to the session: the signed attestation body — which the Play Integrity
-nonce accompanies — carries `liveness_decision`, and the server rejects the
-submission if that signed value is tampered with.
+The phone requests this nonce *before* liveness runs. On Android, the nonce
+is **not** fed directly to Play Integrity — instead, the SDK computes a
+`requestHash = base64url(SHA256("nonce|decision|session_id|challenge_id"))`
+and passes that into `StandardIntegrityManager.request`. The relay then
+re-derives the same hash on the server side and compares it to
+`requestDetails.requestHash` in the Play Integrity verdict, which binds
+`liveness_decision` into the hardware-signed envelope — a tampered decision
+breaks the device signature itself, not just the outer canonical-JSON
+signature.
 
 ```typescript
 import { sha256base64url } from '../utils/crypto';
@@ -1139,14 +1142,25 @@ async function verifyPlayIntegrity(
 
 ### If Play Integrity Unavailable
 
+The SDK classifies environmental failures (Play Services absent, API not
+available, cannot bind to service) as `UNSUPPORTED` and attaches no
+`device_attestation`; the relay clusters the session as `software_only`.
+Transient / adversarial failures stay in the `FAILED` bucket so the
+downgrade-attack clustering heuristic still sees them. See
+`PlayIntegrityService.classify` for the full code mapping.
+
 ```kotlin
 try {
-    val token = requestIntegrityToken(nonce)
+    val requestHash = CDLSession.computeRequestHash(nonce, decision, sessionId, challengeId)
+    val token = playIntegrity.requestIntegrityToken(requestHash)
     attestation.deviceAttestation = token
     attestation.assuranceLevel = "IAL2"
-} catch (e: IntegrityServiceException) {
+} catch (e: PlayIntegrityUnavailableException) {
+    attestation.hwAttestationStatus = HwStatus.UNSUPPORTED
     attestation.assuranceLevel = "software_only"
-    // omit device_attestation field
+} catch (e: Exception) {
+    attestation.hwAttestationStatus = HwStatus.FAILED
+    attestation.assuranceLevel = "software_only"
 }
 ```
 
@@ -1158,6 +1172,25 @@ try {
 4. Download service account JSON key
 5. Set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json`
 6. Add key file to `.gitignore` — never commit it
+
+### Android SDK wiring
+
+Pass the Cloud Project **number** (the all-digit value from Cloud Console →
+Project Settings → "Project number", NOT the alphanumeric Project ID) to
+`CDLSession`:
+
+```kotlin
+val session = CDLSession(
+    payload = payload,
+    context = applicationContext,
+    cloudProjectNumber = 123456789012L,  // your Cloud project number
+    // ...
+)
+```
+
+Pass `null` (the default) to opt out of hardware attestation entirely —
+useful on AOSP-only fleets and in Phase-1 CI. With `null`, the SDK never
+touches Play Services and the relay clusters the session as `software_only`.
 
 ---
 

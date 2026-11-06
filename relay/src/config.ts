@@ -64,6 +64,19 @@ export function config() {
     // ("prod", "staging") then quietly opened an SSRF path to loopback in a
     // real deploy. Require an explicit opt-in: ALLOW_LOOPBACK_WEBHOOKS=true.
     allowLoopbackWebhooks: env.ALLOW_LOOPBACK_WEBHOOKS === 'true',
+    // Browser-facing endpoints (/cdl/session/initiate, /status, /ws) are called
+    // from the relying party's page, which is a different origin in every
+    // deployment model except "same-host reverse proxy": a hosted relay
+    // (relay.openliveness.dev) and a self-hosted subdomain (relay.bank.com)
+    // are both cross-origin from the RP page per the browser same-origin
+    // rule. CSV of exact origins the relay is willing to serve CORS for;
+    // empty in production means "no browser clients" and is enforced at
+    // boot. In dev we default to the bank-kyc-demo on :4000 so Path B works
+    // out of the box without the operator setting the env.
+    allowedOrigins: (env.ALLOWED_ORIGINS ?? (secure ? '' : 'http://localhost:4000'))
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     httpBase: `${secure ? 'https' : 'http'}://${hostWithPort}`,
     wsBase: `${secure ? 'wss' : 'ws'}://${hostWithPort}`,
   };

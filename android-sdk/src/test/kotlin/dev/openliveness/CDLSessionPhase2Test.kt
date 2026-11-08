@@ -2,7 +2,9 @@ package dev.openliveness
 
 import android.content.Context
 import com.google.android.play.core.integrity.IntegrityServiceException
+import com.google.android.play.core.integrity.StandardIntegrityException
 import com.google.android.play.core.integrity.model.IntegrityErrorCode
+import com.google.android.play.core.integrity.model.StandardIntegrityErrorCode
 import dev.openliveness.attestation.PlayIntegrityClient
 import dev.openliveness.attestation.PlayIntegrityService
 import io.mockk.coEvery
@@ -81,9 +83,15 @@ class CDLSessionPhase2Test {
     @Test
     fun `requestDeviceAttestation returns OK with token on success`() = runBlocking {
         server.enqueue(MockResponse().setBody("""{"nonce":"n1"}"""))
-        coEvery { playIntegrity.requestIntegrityToken("n1") } returns "integrity-tok"
+        // Standard migration: the arg to requestIntegrityToken is now a
+        // hash of (nonce|decision|session|challenge), not the raw nonce.
+        // Match on the exact computed value so a regression that silently
+        // dropped the decision (or reordered the fields) fails here —
+        // dropping the binding is the whole thing Option B exists to close.
+        val expectedHash = CDLSession.computeRequestHash("n1", "pass", "s1", "c1")
+        coEvery { playIntegrity.requestIntegrityToken(expectedHash) } returns "integrity-tok"
 
-        val result = session().requestDeviceAttestation()
+        val result = session().requestDeviceAttestation("pass")
 
         assertEquals("integrity-tok", result.token)
         assertEquals(CDLSession.HwStatus.OK, result.status)
@@ -98,7 +106,7 @@ class CDLSessionPhase2Test {
         server.enqueue(MockResponse().setBody("""{"nonce":"n1"}"""))
         coEvery { playIntegrity.requestIntegrityToken(any()) } throws RuntimeException("device not Play-certified")
 
-        val result = session().requestDeviceAttestation()
+        val result = session().requestDeviceAttestation("pass")
 
         assertNull(result.token)
         assertEquals(CDLSession.HwStatus.FAILED, result.status)
@@ -111,7 +119,7 @@ class CDLSessionPhase2Test {
     fun `requestDeviceAttestation returns FAILED when integrity-nonce call fails`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(500).setBody("boom"))
 
-        val result = session().requestDeviceAttestation()
+        val result = session().requestDeviceAttestation("pass")
 
         assertNull(result.token)
         assertEquals(CDLSession.HwStatus.FAILED, result.status)
@@ -129,7 +137,7 @@ class CDLSessionPhase2Test {
         coEvery { playIntegrity.requestIntegrityToken(any()) } throws CancellationException("cancelled")
 
         assertThrows(CancellationException::class.java) {
-            runBlocking { session().requestDeviceAttestation() }
+            runBlocking { session().requestDeviceAttestation("pass") }
         }
     }
 
@@ -150,7 +158,7 @@ class CDLSessionPhase2Test {
         coEvery { playIntegrity.requestIntegrityToken(any()) } throws
             PlayIntegrityUnavailableException("Play Integrity unavailable (code=-9)")
 
-        val result = session().requestDeviceAttestation()
+        val result = session().requestDeviceAttestation("pass")
 
         assertNull(result.token)
         assertEquals(CDLSession.HwStatus.UNSUPPORTED, result.status)
@@ -165,7 +173,7 @@ class CDLSessionPhase2Test {
         coEvery { playIntegrity.requestIntegrityToken(any()) } throws
             CDLException("Play Integrity failed (code=-100): internal")
 
-        val result = session().requestDeviceAttestation()
+        val result = session().requestDeviceAttestation("pass")
 
         assertNull(result.token)
         assertEquals(CDLSession.HwStatus.FAILED, result.status)
@@ -214,11 +222,137 @@ class CDLSessionPhase2Test {
         assert(classified is CDLException && classified !is PlayIntegrityUnavailableException)
     }
 
+    // Standard-migration drift — the Standard API throws StandardIntegrityException,
+    // not IntegrityServiceException. classify must cover both shapes so a
+    // StandardIntegrity warm-up failure on an AOSP device still buckets as
+    // UNSUPPORTED rather than falling through to the FAILED bucket (which
+    // would re-break the downgrade-attack signal for Standard-migrated callers).
+    @Test
+    fun `classify maps StandardIntegrityException PLAY_SERVICES_NOT_FOUND to PlayIntegrityUnavailableException`() {
+        val e = fakeStandardIntegrityException(StandardIntegrityErrorCode.PLAY_SERVICES_NOT_FOUND)
+        val classified = PlayIntegrityService.classify(e)
+        assert(classified is PlayIntegrityUnavailableException) {
+            "expected PlayIntegrityUnavailableException, got ${classified.javaClass.name}"
+        }
+    }
+
+    @Test
+    fun `classify keeps StandardIntegrityException NETWORK_ERROR in CDLException FAILED bucket`() {
+        val e = fakeStandardIntegrityException(StandardIntegrityErrorCode.NETWORK_ERROR)
+        val classified = PlayIntegrityService.classify(e)
+        assert(classified is CDLException && classified !is PlayIntegrityUnavailableException)
+    }
+
+    // Standard-specific: CLOUD_PROJECT_NUMBER_IS_INVALID is a config error
+    // (wrong number passed to the SDK), not environmental. It MUST stay in
+    // FAILED so an operator flipping an env var to the wrong value lights
+    // up the failure heuristic rather than silently looking like every
+    // AOSP device.
+    @Test
+    fun `classify keeps CLOUD_PROJECT_NUMBER_IS_INVALID in FAILED bucket`() {
+        val e = fakeStandardIntegrityException(StandardIntegrityErrorCode.CLOUD_PROJECT_NUMBER_IS_INVALID)
+        val classified = PlayIntegrityService.classify(e)
+        assert(classified is CDLException && classified !is PlayIntegrityUnavailableException) {
+            "expected plain CDLException (FAILED bucket), got ${classified.javaClass.name}"
+        }
+    }
+
     private fun fakeIntegrityException(code: Int): IntegrityServiceException =
         mockk(relaxed = true) {
             every { errorCode } returns code
             every { message } returns "test-code-$code"
         }
+
+    private fun fakeStandardIntegrityException(code: Int): StandardIntegrityException =
+        mockk(relaxed = true) {
+            every { errorCode } returns code
+            every { message } returns "test-std-code-$code"
+        }
+
+    // Standard-migration drift test — `requestDeviceAttestation` must
+    // short-circuit to UNSUPPORTED without any HTTP or Play Integrity
+    // activity when the integrator opts out of hardware attestation by
+    // leaving `cloudProjectNumber = null` AND injects no test stub. The
+    // short-circuit is how AOSP-only fleets and Phase-1 e2e CI skip the
+    // Play Services dependency entirely; a regression that kept calling
+    // `relay.requestIntegrityNonce` would surface either as surprise
+    // network cost or as HwStatus.FAILED on devices that were legitimately
+    // opted out.
+    @Test
+    fun `requestDeviceAttestation short-circuits to UNSUPPORTED when cloudProjectNumber is null and no client injected`() = runBlocking {
+        // Deliberately enqueue no response — if the SUT touched the relay
+        // here the mock would block the dispatch and this test would hang,
+        // surfacing the regression as a timeout rather than a wrong code.
+        val payload = QRPayload(
+            session_id = "s1",
+            challenge_id = "c1",
+            challenge_sequence = listOf("blink"),
+            relay_ws = "wss://unused",
+            relay_http = server.url("/").toString().trimEnd('/'),
+            expires_at = "2099-01-01T00:00:00Z",
+            version = "1.0",
+        )
+        val opted_out = CDLSession(
+            payload = payload,
+            context = context,
+            // playIntegrity = null, cloudProjectNumber = null → no attestation.
+        )
+        val result = opted_out.requestDeviceAttestation("pass")
+        assertNull(result.token)
+        assertEquals(CDLSession.HwStatus.UNSUPPORTED, result.status)
+        // No HTTP activity — the request queue should still be empty.
+        assertEquals(0, server.requestCount)
+    }
+
+    // Standard-migration drift test — the requestHash MUST bind the
+    // liveness_decision. Pin the exact SHA-256|base64url encoding so a
+    // regression (field reorder, dropped separator, wrong hash algorithm)
+    // fails here instead of silently shipping a hardware signature that
+    // doesn't cover the decision. The relay recomputes the same string;
+    // both encodings are frozen wire contract.
+    @Test
+    fun `computeRequestHash binds all four fields deterministically`() {
+        // Expected = base64url(SHA256("n|d|s|c")) — recomputed by hand
+        // from the material. Hard-coding the digest string catches any
+        // accidental change to the material format (separator, order,
+        // field normalization).
+        val h = CDLSession.computeRequestHash(
+            nonce = "n",
+            decision = "d",
+            sessionId = "s",
+            challengeId = "c",
+        )
+        // Deterministic: same inputs → same hash.
+        assertEquals(h, CDLSession.computeRequestHash("n", "d", "s", "c"))
+        // Each field participates: changing any one must change the hash.
+        assert(h != CDLSession.computeRequestHash("x", "d", "s", "c")) { "nonce must bind" }
+        assert(h != CDLSession.computeRequestHash("n", "x", "s", "c")) { "decision must bind" }
+        assert(h != CDLSession.computeRequestHash("n", "d", "x", "c")) { "sessionId must bind" }
+        assert(h != CDLSession.computeRequestHash("n", "d", "s", "x")) { "challengeId must bind" }
+        // Base64url (no `+`, `/`, or `=` padding).
+        assert(h.none { it == '+' || it == '/' || it == '=' }) {
+            "expected base64url-no-padding alphabet, got: $h"
+        }
+    }
+
+    // Standard-migration drift test — field drift between SDK and relay
+    // breaks the whole trust story. Pin the exact string for a known tuple
+    // so the Node-side computeExpectedRequestHash in relay/attestation/google.ts
+    // can be verified against this same vector. This test produces the
+    // vector; a separate relay test consumes it. If this value ever changes,
+    // the relay test MUST change in the same commit — the wire contract
+    // moves atomically or not at all.
+    @Test
+    fun `computeRequestHash matches the frozen wire vector`() {
+        val h = CDLSession.computeRequestHash(
+            nonce = "nonce-abc",
+            decision = "pass",
+            sessionId = "sess-123",
+            challengeId = "chal-456",
+        )
+        // SHA-256 of "nonce-abc|pass|sess-123|chal-456", base64url, no pad.
+        assertEquals("KzacUzlbFcc8Bp7Q73HvouOF8yB6qh-_V9wHbUfceJQ", h)
+    }
 
     // L3 drift test — the session must pin applicationContext. Verifies
     // the constructor reads applicationContext off the passed Context; a

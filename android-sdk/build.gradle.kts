@@ -1,14 +1,19 @@
 plugins {
     id("com.android.library") version "8.2.2"
     kotlin("android") version "1.9.0"
+    `maven-publish`
 }
 
-// Published coordinate so a sibling Gradle project (android-sample) can
-// pull this in via `includeBuild("../android-sdk")` + a normal Maven
-// `implementation(...)` line. The composite-build dependency-substitution
-// rule matches on group + rootProject.name.
+// Published coordinate. Two consumers:
+//   1. sibling Gradle project (android-sample) via `includeBuild(...)` —
+//      composite-build dependency substitution matches on group +
+//      rootProject.name, version is ignored.
+//   2. JitPack release pipeline — on any pushed `v*` tag, JitPack runs
+//      `./gradlew publishToMavenLocal` and serves the resulting AAR at
+//      `com.github.ramuvenky.openliveness:android-sdk:<tag>`. Version
+//      here must match the tag minus the leading `v`.
 group = "dev.openliveness"
-version = "0.1"
+version = "0.1.0"
 
 android {
     namespace = "dev.openliveness"
@@ -84,6 +89,31 @@ android {
     // and the builder handles that gracefully ("unknown" fallback).
     testOptions {
         unitTests.isReturnDefaultValues = true
+    }
+
+    // Required by maven-publish for an Android library. Without this,
+    // `publishToMavenLocal` can't find a release component to attach,
+    // and JitPack falls back to an unusable "no release artifact" build.
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
+}
+
+// Registers the Maven publication that JitPack consumes. Must be inside
+// afterEvaluate because the "release" software component is only
+// materialized after AGP finishes configuring the library variant.
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                groupId = project.group.toString()
+                artifactId = "android-sdk"
+                version = project.version.toString()
+            }
+        }
     }
 }
 

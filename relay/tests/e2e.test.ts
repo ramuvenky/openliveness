@@ -3,7 +3,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import Redis from 'ioredis';
 import WebSocket from 'ws';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { makeAttestation, makePemKeys } from './helpers';
 
@@ -63,6 +63,25 @@ describe.skipIf(!available)('relay end to end', () => {
     disconnectAllRedis();
   });
 
+  // Each test opens with a fresh rate-limit bucket so the /initiate budget
+  // (10/minute per {ip, rp}) is scoped per-test instead of accumulating
+  // across the whole suite. Previously the 7th-onward test failed with 429
+  // because every initiate ran from the same 127.0.0.1 + example-bank.com
+  // pair; the 429 test downstream still works because it hammers initiate
+  // in a loop until it trips. Narrow delete rather than flushdb: session /
+  // challenge state must survive across tests the way the server sees it.
+  beforeEach(async () => {
+    // Delete via the primary client (getRedis) rather than the rate-limit
+    // client: the rate-limit client runs with enableOfflineQueue=false so
+    // the first command on it before the server has warmed the connection
+    // throws "Stream isn't writeable". Both clients point at the same DB,
+    // so a delete through either is visible to the other.
+    const { getRedis } = await import('../src/session/store');
+    const r = getRedis();
+    const keys = await r.keys('cdl:ratelimit:*');
+    if (keys.length > 0) await r.del(...keys);
+  });
+
   async function initiate(assurance = 'any') {
     const res = await fetch(`${base}/cdl/session/initiate`, {
       method: 'POST',
@@ -86,6 +105,21 @@ describe.skipIf(!available)('relay end to end', () => {
         if (msg.type === type) resolve(msg);
       });
     });
+
+  // Opens the phone WS, waits for session_acknowledged, then closes. The
+  // ack is the server-side signal that the session has transitioned from
+  // 'initiated' to 'phone_connected' (the state /complete requires). The
+  // bare `(await open(deviceUrl(s))).close()` pattern races: on localhost
+  // the WS 'open' event can resolve before the server's async
+  // updateSession call lands, so a /complete fired right after sees
+  // state='initiated' and returns ERR_SESSION_WRONG_STATE (409). Tests
+  // that don't care about the WS messages still need the barrier.
+  async function connectPhoneAndClose(s: Record<string, any>) {
+    const phone = await open(deviceUrl(s));
+    const ack = nextMessage(phone, 'session_acknowledged');
+    await ack;
+    phone.close();
+  }
 
   async function sign(s: Record<string, any>, over = {}) {
     return makeAttestation({
@@ -261,7 +295,7 @@ describe.skipIf(!available)('relay end to end', () => {
     // make the outcome unambiguous: accepted mirrors the liveness decision,
     // and no attestation_token leaks to a client that only checks accepted.
     const { body: s } = await initiate();
-    (await open(deviceUrl(s))).close();
+    await connectPhoneAndClose(s);
     const res = await complete(s.session_id, await sign(s, { liveness_decision: 'fail' }));
     expect(res.status).toBe(200);
     const parsed = (await res.json()) as Record<string, any>;
@@ -279,7 +313,7 @@ describe.skipIf(!available)('relay end to end', () => {
 
   it('rejects a tampered attestation', async () => {
     const { body: s } = await initiate();
-    (await open(deviceUrl(s))).close();
+    await connectPhoneAndClose(s);
     const att = await sign(s, { liveness_decision: 'fail' });
     const res = await complete(s.session_id, { ...att, liveness_decision: 'pass' });
     expect(res.status).toBe(400);
@@ -293,7 +327,7 @@ describe.skipIf(!available)('relay end to end', () => {
   // (verify then burn) means a retry with the same challenge still works.
   it('M1: a bad-signature submission does NOT burn the challenge; a legit retry still succeeds', async () => {
     const { body: s } = await initiate();
-    (await open(deviceUrl(s))).close();
+    await connectPhoneAndClose(s);
 
     const legit = await sign(s);
     // Flip liveness_decision after signing to simulate a bad signature.
@@ -317,7 +351,7 @@ describe.skipIf(!available)('relay end to end', () => {
 
   it('rejects a second submission and a completed session', async () => {
     const { body: s } = await initiate();
-    (await open(deviceUrl(s))).close();
+    await connectPhoneAndClose(s);
     const att = await sign(s);
     expect((await complete(s.session_id, att)).status).toBe(200);
     const again = await complete(s.session_id, att);
@@ -326,7 +360,7 @@ describe.skipIf(!available)('relay end to end', () => {
 
   it('rejects a stale attestation', async () => {
     const { body: s } = await initiate();
-    (await open(deviceUrl(s))).close();
+    await connectPhoneAndClose(s);
     const old = new Date(Date.now() - 200_000).toISOString();
     const res = await complete(s.session_id, await sign(s, { timestamp: old }));
     expect(((await res.json()) as Record<string, any>).error_code).toBe('ERR_TIMESTAMP_STALE');
@@ -348,7 +382,7 @@ describe.skipIf(!available)('relay end to end', () => {
 
   it('refuses a software_only result when IAL2 is required', async () => {
     const { body: s } = await initiate('IAL2');
-    (await open(deviceUrl(s))).close();
+    await connectPhoneAndClose(s);
     const res = await complete(s.session_id, await sign(s));
     expect(((await res.json()) as Record<string, any>).error_code).toBe('ERR_ATTEST_REQUIRED');
   });
@@ -365,5 +399,38 @@ describe.skipIf(!available)('relay end to end', () => {
     let last = 200;
     for (let i = 0; i < 12 && last !== 429; i++) last = (await initiate()).res.status;
     expect(last).toBe(429);
+  });
+
+  // Pins the beforeEach rate-limit reset. Without it, the 7th+ test in
+  // the suite would deterministically fail with 429 because every test
+  // calls initiate() from the same {127.0.0.1, example-bank.com} bucket.
+  // A regression that removed the beforeEach would re-surface the pre-
+  // Phase-5 flakiness; this test fails loudly if it ever disappears.
+  it('rate-limit bucket is drained between tests', async () => {
+    // At this point the previous test just burned the whole 10/minute
+    // budget. If the reset is working, this fresh initiate succeeds
+    // with 200; if the reset was dropped, the client budget is still
+    // exhausted and we see 429.
+    const { res } = await initiate();
+    expect(res.status).toBe(200);
+  });
+
+  // Pins the connectPhoneAndClose ack-barrier. The barrier exists because
+  // on localhost the server-side `updateSession(..., 'phone_connected')`
+  // can land AFTER the WS 'open' event resolves client-side. Without the
+  // wait-for-session_acknowledged step, a /complete fired right after
+  // close would see state='initiated' and return ERR_SESSION_WRONG_STATE.
+  // Previously made four tests flaky under suite ordering. Document the
+  // behavior the barrier guarantees: by the time the helper returns, a
+  // subsequent /complete MUST see the session in phone_connected.
+  it('connectPhoneAndClose leaves the session in phone_connected state', async () => {
+    const { body: s } = await initiate();
+    await connectPhoneAndClose(s);
+    // A subsequent /complete with a valid attestation reaches the
+    // signature + attestation checks (status 200 or 400 depending on the
+    // signature), never 409 ERR_SESSION_WRONG_STATE. We send a valid one
+    // so the assertion is a clean 200.
+    const res = await complete(s.session_id, await sign(s));
+    expect(res.status).toBe(200);
   });
 });

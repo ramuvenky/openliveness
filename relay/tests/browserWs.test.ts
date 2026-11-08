@@ -51,7 +51,12 @@ class FakeMulti {
 class FakeRedis {
   hashes = new Map<string, Record<string, string>>();
   counters = new Map<string, number>();
+  // Artificial delay injected into hgetall (which the WS handler awaits via
+  // loadSession before authenticating the browser). Lets a test reproduce
+  // the race where the browser's auth frame arrives during the Redis read.
+  hgetallDelayMs = 0;
   async hgetall(key: string) {
+    if (this.hgetallDelayMs > 0) await new Promise((r) => setTimeout(r, this.hgetallDelayMs));
     return this.hashes.get(key) ?? {};
   }
   async incr(key: string) {
@@ -145,6 +150,33 @@ describe('browser WS /cdl/session/:id/ws — M3 late-join and M5 auth handshake'
     seed(fake, s);
 
     const { ws, messages } = await openWs(`ws://127.0.0.1:${port}/cdl/session/${s.session_id}/ws`);
+    ws.send(JSON.stringify({ type: 'auth', token: s.poll_token }));
+
+    const frame = await waitForMessage(messages);
+    expect(frame.type).toBe('phone_connected');
+    ws.close();
+    await waitClose(ws);
+  });
+
+  it('M5: accepts an auth frame that arrives during the loadSession Redis await (race fix)', async () => {
+    // Regression: the handler previously registered the 'message' listener
+    // only AFTER `await loadSession(id)`. On localhost the browser's auth
+    // frame arrives in <1ms while Redis hgetall takes a few ms; `ws` is
+    // an EventEmitter so a 'message' event emitted before a listener is
+    // attached is dropped silently. The 5s auth timer would then fire
+    // with ERR_INVALID_POLL_TOKEN even though the browser sent the right
+    // token. Fix: attach the first-frame listener synchronously before
+    // the await. This test drives the race by delaying hgetall for 50ms
+    // and sending the auth frame on 'open' — well before loadSession
+    // resolves — and asserts the handshake still succeeds.
+    fake.hgetallDelayMs = 50;
+    const s = makeSession({ state: 'phone_connected' });
+    seed(fake, s);
+
+    const { ws, messages } = await openWs(`ws://127.0.0.1:${port}/cdl/session/${s.session_id}/ws`);
+    // Fire the auth frame immediately — the server is still mid-await on
+    // loadSession, so without the sync pre-await listener this frame is
+    // dropped and the 5s timer later fires.
     ws.send(JSON.stringify({ type: 'auth', token: s.poll_token }));
 
     const frame = await waitForMessage(messages);

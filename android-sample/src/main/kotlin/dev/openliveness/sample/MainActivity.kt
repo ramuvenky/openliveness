@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ambientView: TextView
     private lateinit var qrInput: EditText
     private lateinit var startButton: Button
+    private lateinit var controlsPanel: LinearLayout
 
     companion object {
         private const val TAG = "OpenLivenessSample"
@@ -176,7 +177,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(promptView)
 
-        val controls = LinearLayout(this).apply {
+        controlsPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 48, 48, 48)
             setBackgroundColor(Color.argb(0xC0, 0, 0, 0))
@@ -190,7 +191,14 @@ class MainActivity : AppCompatActivity() {
             hint = "Paste QR payload (base64)"
             setHintTextColor(Color.LTGRAY)
             setTextColor(Color.WHITE)
+            // Bound the height so a long base64 payload scrolls inside
+            // the field instead of growing the controls panel up over
+            // the camera preview + prompt. Dev-harness QR payloads are
+            // hundreds of chars; without a cap the field swallowed the
+            // whole screen on paste and made the challenge unusable.
             minLines = 2
+            maxLines = 3
+            isVerticalScrollBarEnabled = true
         }
         statusView = TextView(this).apply {
             text = ""
@@ -205,11 +213,11 @@ class MainActivity : AppCompatActivity() {
             text = "Start liveness"
             setOnClickListener { runSession() }
         }
-        controls.addView(qrInput)
-        controls.addView(permBtn)
-        controls.addView(startButton)
-        controls.addView(statusView)
-        root.addView(controls)
+        controlsPanel.addView(qrInput)
+        controlsPanel.addView(permBtn)
+        controlsPanel.addView(startButton)
+        controlsPanel.addView(statusView)
+        root.addView(controlsPanel)
 
         return root
     }
@@ -221,6 +229,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
         startButton.isEnabled = false
+        // Hide the paste+button panel while the session runs so the
+        // camera preview and the challenge prompt are fully visible. The
+        // panel is bottom-aligned WRAP_CONTENT, so with a long pasted
+        // payload it otherwise covers the lower third of the screen —
+        // including the prompt and most of the user's face in preview.
+        // Restored in the finally below regardless of outcome.
+        controlsPanel.visibility = View.GONE
         val useStub = !modelAssetAvailable()
         if (useStub && !stubWarningLogged) {
             Log.w(
@@ -332,6 +347,7 @@ class MainActivity : AppCompatActivity() {
                 onFailure = { "error: ${it.javaClass.simpleName}: ${it.message}" }
             )
             startButton.isEnabled = true
+            controlsPanel.visibility = View.VISIBLE
         }
     }
 

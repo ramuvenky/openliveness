@@ -38,7 +38,18 @@ export async function verifyHardware(
     return { attested: ok, strong: ok };
   }
 
-  const result = await verifyPlayIntegrity(att.device_attestation, att.session_id);
+  // Thread challenge_id + liveness_decision through so the server can
+  // recompute the Play Integrity Standard requestHash the SDK bound at
+  // call time. Both fields are already on the posted (signature-checked)
+  // attestation, so there's no new trust surface — we're just moving the
+  // decision check out of "covered only by SDK signature" and into
+  // "covered by the hardware-signed verdict too".
+  const result = await verifyPlayIntegrity(
+    att.device_attestation,
+    att.session_id,
+    att.challenge_id,
+    att.liveness_decision,
+  );
   // Android MEETS_DEVICE_INTEGRITY alone can be satisfied by a software-only
   // keystore on a non-TEE device; IAL2 requires the StrongBox / TEE-backed
   // MEETS_STRONG_INTEGRITY verdict. Reject here rather than at checkAssurance

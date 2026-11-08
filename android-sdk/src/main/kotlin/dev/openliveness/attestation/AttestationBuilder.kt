@@ -17,18 +17,13 @@ import java.time.format.DateTimeFormatter
  * so the end-to-end relay handshake stays exercisable before the real
  * detection layers are wired in.
  *
- * Platform asymmetry — KNOWN LIMITATION until Phase 4 Play Integrity
- * Standard migration. On iOS, `liveness_decision` is baked into the App
- * Attest assertion client data via `CDLSession.generateAssertion`, so
- * forging the field at the SDK layer breaks the device-signed envelope.
- * On Android, Play Integrity classic only signs the server-supplied
- * nonce; `liveness_decision` here is covered by the outer `signature`
- * but not by the hardware-backed assertion. A server policy that
- * weighs the decision more when the device also signed it will see
- * different trust levels for iOS and Android. Phase 4 should migrate
- * Android to Play Integrity Standard and bind the decision via
- * `requestHash`; until then, treat the two platforms as equal-trust
- * from the server's perspective.
+ * Platform parity (post-Standard migration): on iOS, `liveness_decision`
+ * is baked into the App Attest assertion client data; on Android, it is
+ * bound into the Play Integrity Standard verdict via `requestHash`
+ * (SHA-256 of `nonce|decision|session_id|challenge_id`). Forging the
+ * decision at the SDK layer now breaks the hardware-signed envelope on
+ * both platforms — the server policy no longer needs to assign asymmetric
+ * trust weights to iOS vs. Android.
  */
 object AttestationBuilder {
 

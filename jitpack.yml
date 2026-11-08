@@ -1,0 +1,18 @@
+# JitPack build config for the openliveness Android SDK.
+#
+# JitPack defaults to JDK 8, which can't compile the SDK (Kotlin 1.9 +
+# AGP 8.2 require JDK 17). The install line below runs the Android
+# subproject's publishToMavenLocal, which produces the AAR + sources
+# jar JitPack serves at:
+#
+#     com.github.ramuvenky.openliveness:android-sdk:<tag>
+#
+# Only the android-sdk module is published this way. The Node packages
+# (@openliveness/verify, @openliveness/web) go to npm, not JitPack —
+# JitPack has no Node support.
+
+jdk:
+  - openjdk17
+
+install:
+  - cd android-sdk && ./gradlew publishToMavenLocal

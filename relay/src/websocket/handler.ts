@@ -74,6 +74,27 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
         return;
       }
       ws.on('close', () => decWsIp(ip));
+
+      // Attach the first-frame listener SYNCHRONOUSLY, before any await.
+      // The browser sends its auth frame immediately on `onopen`, and on
+      // localhost its network RTT is <1ms while `loadSession` below is a
+      // few ms of Redis. `ws` is an EventEmitter and drops 'message'
+      // events that have no listener attached — so if we only registered
+      // the listener AFTER `await loadSession`, a fast auth frame would
+      // arrive during that await, be silently dropped, and the 5s timer
+      // would fire with "browser WS auth failed". Race fired routinely
+      // on hot-cache localhost. Capture the first frame now; validate
+      // after we know the expected poll_token.
+      let firstFrame: unknown = undefined;
+      let firstFrameArrived: () => void = () => {};
+      const firstFramePromise = new Promise<void>((resolve) => {
+        firstFrameArrived = resolve;
+      });
+      ws.once('message', (raw) => {
+        firstFrame = raw;
+        firstFrameArrived();
+      });
+
       const session = await loadSession(id);
 
       const authenticated = await (async () => {
@@ -82,33 +103,31 @@ export async function registerWebsocketRoutes(app: FastifyInstance) {
           req.log.warn({ session_id: id }, 'browser WS used legacy ?token= — upgrade the web-sdk');
           return safeEqual(session.poll_token, req.query.token);
         }
-        return await new Promise<boolean>((resolve) => {
-          const timer = setTimeout(() => {
-            ws.off('message', onMessage);
-            resolve(false);
-          }, BROWSER_AUTH_TIMEOUT_MS);
-          const onMessage = (raw: unknown) => {
-            clearTimeout(timer);
-            ws.off('message', onMessage);
-            try {
-              const parsed = JSON.parse(String(raw));
-              if (
-                parsed?.type === 'auth' &&
-                typeof parsed.token === 'string' &&
-                safeEqual(session.poll_token, parsed.token)
-              ) {
-                return resolve(true);
-              }
-            } catch {
-              // fall through to reject
-            }
-            resolve(false);
-          };
-          ws.on('message', onMessage);
-        });
+        // Wait up to BROWSER_AUTH_TIMEOUT_MS for a frame — it may have
+        // already arrived (captured by the once-listener above) in which
+        // case firstFramePromise is already resolved.
+        const timedOut = await Promise.race([
+          firstFramePromise.then(() => false),
+          new Promise<true>((resolve) => setTimeout(() => resolve(true), BROWSER_AUTH_TIMEOUT_MS)),
+        ]);
+        if (timedOut || firstFrame === undefined) return false;
+        try {
+          const parsed = JSON.parse(String(firstFrame));
+          return (
+            parsed?.type === 'auth' &&
+            typeof parsed.token === 'string' &&
+            safeEqual(session.poll_token, parsed.token)
+          );
+        } catch {
+          return false;
+        }
       })();
 
       if (!authenticated) {
+        req.log.warn(
+          { session_id: id, had_session: !!session, used_query_token: !!req.query.token },
+          'browser WS auth failed (missing session, bad token, or 5s timeout)',
+        );
         ws.send(
           JSON.stringify({
             type: 'error',

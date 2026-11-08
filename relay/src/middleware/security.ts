@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { config } from '../config';
 import { hmacHex } from '../utils/crypto';
@@ -6,6 +7,26 @@ import { CDLError } from '../errors';
 
 export async function registerSecurity(app: FastifyInstance) {
   await app.register(helmet);
+
+  // Relying-party browser pages are a different origin from the relay in
+  // every deployment model except "same-host reverse proxy" — a hosted relay
+  // or a self-hosted subdomain is cross-origin by browser same-origin rules.
+  // Register CORS with an explicit allowlist from config.allowedOrigins; in
+  // production this must be set by the operator (we refuse to boot otherwise
+  // — a prod relay with CORS off is a deployment mistake, not a safety win,
+  // because the RP's /verify-liveness call goes through their own backend,
+  // not the browser → relay path CORS gates).
+  const c = config();
+  if (c.nodeEnv === 'production' && c.allowedOrigins.length === 0) {
+    throw new Error(
+      'refusing to start: ALLOWED_ORIGINS must list the relying-party page origins in production',
+    );
+  }
+  await app.register(cors, {
+    origin: c.allowedOrigins,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    credentials: false,
+  });
 
   // One structured line per request. The ip is pseudonymized with HMAC-SHA256
   // under IP_HASH_SECRET — a plain SHA-256 is reversible with a 2^32 rainbow

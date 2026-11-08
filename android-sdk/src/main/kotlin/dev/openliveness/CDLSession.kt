@@ -24,6 +24,12 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.security.MessageDigest
+// java.util.Base64 (not android.util.Base64) so the hash helper also
+// works under JVM unit tests — android.util.* returns stubs when
+// `isReturnDefaultValues = true`, which would silently produce null for
+// the hash and mask a real bug.
+import java.util.Base64
 
 /**
  * Entry point for the Android side of a CDL session. Construct from the
@@ -36,8 +42,22 @@ class CDLSession(
     context: Context,
     /** Overridable so tests can exercise the timeout path without waiting 30 s. */
     private val ackTimeoutMs: Long = DEFAULT_ACK_TIMEOUT_MS,
+    /** Google Cloud project number for Play Integrity Standard. Required
+     *  for hardware attestation — Standard's `prepareIntegrityToken` call
+     *  rejects the warm-up without it. Pass `null` to opt out of hardware
+     *  attestation entirely; `requestDeviceAttestation` short-circuits to
+     *  `HwStatus.UNSUPPORTED` without ever touching Play Services (the
+     *  relay then clusters the session as software_only). Integrators
+     *  running on an AOSP-only fleet or during Phase-1 e2e CI should pass
+     *  null; everyone shipping to Play Store must pass their real project
+     *  number. Find it in Cloud Console → Project Settings → "Project
+     *  number" (the all-digit value, not the alphanumeric project ID). */
+    private val cloudProjectNumber: Long? = null,
     /** Overridable so tests can stub the Play Integrity dependency, which is
-     *  unavailable off-device. Default resolves against the real service. */
+     *  unavailable off-device. Default resolves against the real service
+     *  when [cloudProjectNumber] is non-null; when null, the stub below is
+     *  never consulted because `requestDeviceAttestation` short-circuits
+     *  before reaching the client. */
     playIntegrity: PlayIntegrityClient? = null,
     /** Optional live-camera landmark source. When null, start() takes the
      *  Phase-1 stub path only if [allowStubMode] is true; otherwise it
@@ -125,8 +145,14 @@ class CDLSession(
     // lifetime of the request; if a caller passed an Activity we'd leak
     // the whole Activity + view hierarchy once start() suspends.
     private val context: Context = context.applicationContext ?: context
-    private val playIntegrity: PlayIntegrityClient =
-        playIntegrity ?: PlayIntegrityService(this.context)
+    private val playIntegrity: PlayIntegrityClient? = when {
+        playIntegrity != null -> playIntegrity
+        cloudProjectNumber != null -> PlayIntegrityService(this.context, cloudProjectNumber)
+        // Null when the integrator opted out of hardware attestation
+        // (cloudProjectNumber == null) AND no test stub was injected;
+        // requestDeviceAttestation reads this directly and short-circuits.
+        else -> null
+    }
 
     private val relay = RelayClient(payload.relay_http)
     private var webSocket: WebSocket? = null
@@ -169,7 +195,7 @@ class CDLSession(
                 } else {
                     AttestationBuilder.stubLivenessDecision(scores)
                 }
-                val hw = requestDeviceAttestation()
+                val hw = requestDeviceAttestation(decision)
                 // `challengeResult == null` is the signal that runLiveness fell
                 // back to the stub path (allowStubMode=true + no landmarkStream).
                 // Stamp the wire marker so the relay can enforce production
@@ -337,37 +363,59 @@ class CDLSession(
     }
 
     /**
-     * Attempts hardware attestation via Play Integrity. Any failure
-     * downgrades to `software_only` so the session stays alive, but the
-     * status tag tells the server which bucket the fallback came from.
+     * Attempts hardware attestation via Play Integrity Standard. Takes the
+     * final `livenessDecision` (already produced by `LivenessOrchestrator`
+     * or the stub rule) so it can bind the decision into the hardware-
+     * signed verdict via Standard's `requestHash`. Any failure downgrades
+     * to `software_only` so the session stays alive, but the status tag
+     * tells the server which bucket the fallback came from.
+     *
+     * When [cloudProjectNumber] is null (and no test stub was injected)
+     * the method short-circuits to UNSUPPORTED without ever touching
+     * Play Services. This is how an integrator opts out of hardware
+     * attestation entirely (AOSP fleet, Phase-1 e2e CI).
      *
      * CancellationException MUST re-throw: Kotlin coroutines' structured
      * concurrency relies on it to unwind nested suspends. Catching
      * `Exception` would swallow it and leave the parent scope believing
      * the child completed normally.
      */
-    internal suspend fun requestDeviceAttestation(): HardwareAttestationResult = try {
-        val nonce = relay.requestIntegrityNonce(payload.session_id)
-        val token = playIntegrity.requestIntegrityToken(nonce)
-        HardwareAttestationResult(token, HwStatus.OK)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: PlayIntegrityUnavailableException) {
-        // Environmental — device cannot do hardware attestation at all
-        // (missing Play Services, outdated Play Store, etc.). Not a
-        // downgrade signal: tag UNSUPPORTED so the server-side clustering
-        // heuristic doesn't light up for every non-Play Android device.
-        // Log at INFO because this is expected on AOSP / Huawei / etc.
-        Log.i(LOG_TAG, "hardware attestation unavailable; tagging UNSUPPORTED", e)
-        HardwareAttestationResult(null, HwStatus.UNSUPPORTED)
-    } catch (e: Exception) {
-        // The server sees a bucket label (ok / unsupported / failed) but no
-        // detail — without a local log the `failed` bucket is opaque in
-        // triage. The exception message is a system-API string (Play Services
-        // status, OkHttp network error), not user data, so logging at WARN is
-        // safe. Downstream treatment is still a soft downgrade to FAILED.
-        Log.w(LOG_TAG, "hardware attestation failed; downgrading to FAILED", e)
-        HardwareAttestationResult(null, HwStatus.FAILED)
+    internal suspend fun requestDeviceAttestation(livenessDecision: String): HardwareAttestationResult {
+        val client = playIntegrity ?: return HardwareAttestationResult(null, HwStatus.UNSUPPORTED)
+        return try {
+            val nonce = relay.requestIntegrityNonce(payload.session_id)
+            // Standard API binds this hash into the hardware-signed verdict.
+            // The relay recomputes it at /complete time from (stored nonce,
+            // posted decision, session_id, challenge_id); a tampered
+            // liveness_decision between here and the relay fails that
+            // recompute → ERR_GOOGLE_INTEGRITY_NONCE.
+            val requestHash = computeRequestHash(
+                nonce = nonce,
+                decision = livenessDecision,
+                sessionId = payload.session_id,
+                challengeId = payload.challenge_id,
+            )
+            val token = client.requestIntegrityToken(requestHash)
+            HardwareAttestationResult(token, HwStatus.OK)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: PlayIntegrityUnavailableException) {
+            // Environmental — device cannot do hardware attestation at all
+            // (missing Play Services, outdated Play Store, etc.). Not a
+            // downgrade signal: tag UNSUPPORTED so the server-side clustering
+            // heuristic doesn't light up for every non-Play Android device.
+            // Log at INFO because this is expected on AOSP / Huawei / etc.
+            Log.i(LOG_TAG, "hardware attestation unavailable; tagging UNSUPPORTED", e)
+            HardwareAttestationResult(null, HwStatus.UNSUPPORTED)
+        } catch (e: Exception) {
+            // The server sees a bucket label (ok / unsupported / failed) but no
+            // detail — without a local log the `failed` bucket is opaque in
+            // triage. The exception message is a system-API string (Play Services
+            // status, OkHttp network error), not user data, so logging at WARN is
+            // safe. Downstream treatment is still a soft downgrade to FAILED.
+            Log.w(LOG_TAG, "hardware attestation failed; downgrading to FAILED", e)
+            HardwareAttestationResult(null, HwStatus.FAILED)
+        }
     }
 
     // MARK: - WebSocket
@@ -441,6 +489,39 @@ class CDLSession(
     companion object {
         const val DEFAULT_ACK_TIMEOUT_MS: Long = 30_000
         private const val LOG_TAG = "OpenLiveness"
+
+        /**
+         * Derives the Play Integrity Standard `requestHash` from the server-
+         * issued nonce and the attestation fields the SDK is about to post.
+         * The relay recomputes this exact hash at /complete time — any drift
+         * between the fields hashed here and the fields in the posted
+         * attestation fails the recompute and returns ERR_GOOGLE_INTEGRITY_NONCE.
+         *
+         * Field order and separator are part of the wire contract: both
+         * sides must agree. Changes here require a matching edit in
+         * `relay/src/attestation/google.ts::computeExpectedRequestHash`.
+         *
+         * Why `|` as a separator: all four fields are URL-safe strings (no
+         * pipes) so delimiter collisions can't let an attacker construct a
+         * different (nonce, decision, session, challenge) tuple that
+         * produces the same concatenation.
+         *
+         * `@JvmStatic` + `internal` so the unit test can pin the encoding
+         * without constructing a full session.
+         */
+        @JvmStatic
+        internal fun computeRequestHash(
+            nonce: String,
+            decision: String,
+            sessionId: String,
+            challengeId: String,
+        ): String {
+            val material = "$nonce|$decision|$sessionId|$challengeId"
+            val digest = MessageDigest.getInstance("SHA-256")
+                .digest(material.toByteArray(Charsets.UTF_8))
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+        }
+
         /** Minimum spacing between processing_update-dropped log lines. One
          *  per second is enough to see a congestion event in triage without
          *  spamming 30 lines/sec on a chronically-stuck WS. */

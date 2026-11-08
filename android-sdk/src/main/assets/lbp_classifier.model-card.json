@@ -1,0 +1,45 @@
+{
+  "model": "openliveness-lbp-texture",
+  "version": "v0.1.0",
+  "artifact": "lbp_classifier.tflite",
+  "artifact_size_bytes": 2816,
+  "sdk_version": "0.1.0",
+  "training": {
+    "corpus": "MSU-MFSD (Wen, Han, Jain 2015 TIFS)",
+    "split": "train (15 clients per train_sub_list.txt)",
+    "disjoint_test_split": "test (20 clients per test_sub_list.txt) — untouched by training",
+    "n_features": 59,
+    "n_train_samples": 1204,
+    "classifier": "LinearSVC + Platt calibration (CalibratedClassifierCV, 5-fold)",
+    "feature": "uniform LBP(8,1) histogram over 80x80 grayscale face crop",
+    "script": "core/models/train_texture_model_msu.py",
+    "export_script": "core/models/export_tflite.py",
+    "pickle_to_tflite_parity": "max abs delta 1e-9 across inner holdout"
+  },
+  "metrics": {
+    "msu_mfsd_test": {
+      "auc": 0.780,
+      "hter": 0.289,
+      "protocol": "ISO/IEC 30107-3 — APCER and BPCER computed at equal-error threshold on the held-out MSU-MFSD test split",
+      "source": "benchmark/ harness, Phase 5 run"
+    },
+    "inner_holdout": {
+      "accuracy": 0.854,
+      "macro_f1": 0.795,
+      "n_val_samples": 302,
+      "note": "Inner holdout of the MSU-MFSD TRAIN split only — used during training for calibration. NOT a generalization number; use msu_mfsd_test above for that."
+    }
+  },
+  "limitations": [
+    "Trained on MSU-MFSD only — a single corpus of 35 clients captured on 2015-era devices. Expect degraded performance on modern high-DPI displays, OLED phones, and non-English demographics underrepresented in MSU-MFSD.",
+    "Layer 4 is one of five defense layers. Do not interpret this model's score in isolation — the SDK orchestrator combines it with Layers 2 (challenge), 3 (rPPG), and 5 (behavioral) before emitting liveness_decision.",
+    "HTER 0.289 on MSU-MFSD test is a research-grade number, not a production SLA. Treat the SDK's liveness_decision as a strong signal, not a sole authenticator."
+  ],
+  "provenance": {
+    "repo": "github.com/ramuvenky/openliveness",
+    "export_commit": "be7df70",
+    "export_commit_subject": "Ship Phase 5: MSU-MFSD benchmark + Android Layer-4 TFLite pipeline"
+  },
+  "license": "Apache-2.0",
+  "contact": "see SECURITY.md"
+}

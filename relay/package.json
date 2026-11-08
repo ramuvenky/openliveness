@@ -11,6 +11,7 @@
     "lint": "tsc -p tsconfig.lint.json"
   },
   "dependencies": {
+    "@fastify/cors": "^9.0.0",
     "@fastify/helmet": "^11.0.0",
     "@fastify/rate-limit": "^9.0.0",
     "@fastify/websocket": "^8.0.0",

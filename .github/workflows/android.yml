@@ -52,6 +52,15 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # Without this, every instrumented-tests run cold-downloads the
+      # ~130 MB Gradle distribution from services.gradle.org (which
+      # redirects to GitHub Releases). GitHub Releases occasionally
+      # returns 504s under load, breaking the job for reasons unrelated
+      # to our code. The cache is workflow-wide, so unit-tests above
+      # has already populated it by the time this job runs.
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v3
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

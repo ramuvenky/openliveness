@@ -104,12 +104,21 @@ proof that a real human was verified on a real device.
 
 ## Quick Start
 
+First, run the relay yourself — it's a Node server in this repo:
+
+```bash
+cd relay && docker compose up -d
+# relay now listening on http://localhost:3000
+```
+
+Then integrate the SDKs into your app:
+
 ```typescript
 // Browser
 import { verify } from '@openliveness/web';
 
 const result = await verify({
-  relayUrl: 'relay.openliveness.dev',
+  relayUrl: 'localhost:3000',              // point at your deployed relay
   assuranceRequired: 'IAL2',
   onQRReady: (dataUrl) => { document.getElementById('qr').src = dataUrl; }
 });
@@ -124,7 +133,7 @@ const result = await verify({
 import { verifyAttestationJWT } from '@openliveness/verify';
 
 const result = await verifyAttestationJWT(token, {
-  relayUrl: 'relay.openliveness.dev',
+  relayUrl: 'localhost:3000',              // same relay as above
   audience: 'your-domain.com',
   requiredAssurance: 'IAL2'
 });
@@ -169,7 +178,7 @@ in any legal or technical sense.
 
 ## Documentation
 
-- [Full Technical Specification](docs/spec.md) — complete implementation guide (28 sections)
+- [Full Technical Specification](docs/Spec.md) — complete implementation guide (28 sections)
 - [Project Background](docs/background.md) — why this exists, what problem it solves
 - [Threat Model](protocol/ThreatModel.md) — what this protects against and what it does not
 - [Attestation Schema](protocol/AttestationSchema.json) — the shared interface contract
@@ -180,7 +189,11 @@ in any legal or technical sense.
 
 ## Status
 
-Active development. Version 0.1.0 target: end of Oct 2026.
+Active development. **v0.1.0 shipping now** (Android SDK via JitPack, `@openliveness/web` and `@openliveness/verify` on npm).
+
+iOS SDK sits in the repo but is not yet published — it's blocked on
+Apple Developer enrollment. Help on finishing that port is the
+highest-value contribution right now; see [CONTRIBUTING](CONTRIBUTING.md).
 
 This is a new project. There is no production deployment yet.
 Early adoption partnerships are actively sought.

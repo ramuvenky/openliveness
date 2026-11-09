@@ -2,10 +2,16 @@
 
 **Open-source liveness verification that never sends biometric data across the network.**
 
-Proves a real live human is present during identity verification using
-the Cross-Device Liveness (CDL) protocol. The user's phone runs all
-biometric computation locally — the server receives only a signed
-cryptographic proof, never video, never images, never face embeddings.
+Proves that a real, live human is in front of the camera — not a
+photo, replay, deepfake, or AI-generated video. Designed to drop
+into identity verification, authentication, and onboarding flows
+as the liveness layer; this project doesn't do identity matching,
+document verification, or PII handling.
+
+Built on the Cross-Device Liveness (CDL) protocol: the user's phone
+runs all biometric computation locally, and the server receives only
+a signed cryptographic proof. Never video, never images, never face
+embeddings.
 
 Designed for banks, KYC providers, healthcare, government services,
 and any application where proving human presence must not compromise
@@ -19,7 +25,7 @@ Web browsers have no way to verify that a camera feed came from real
 hardware. An attacker installs virtual camera software (OBS, ManyCam),
 feeds AI-generated video, and the liveness algorithm never knows the
 physical camera was never involved. This is called an **injection attack**
-— the dominant fraud vector in identity verification today.
+— the dominant fraud vector against remote liveness checks today.
 
 Every commercial liveness service solves this by sending your video
 to their cloud. Your face — one of the most sensitive categories of
@@ -191,8 +197,8 @@ in any legal or technical sense.
 
 ## Who This Is For
 
-- **Banks & financial institutions** — KYC onboarding that meets IAL2 (NIST SP 800-63-3) without cloud biometric processing
-- **Government & public sector** — remote identity proofing with auditable, open-source algorithms
+- **Banks & financial institutions** — IAL2-grade liveness for KYC onboarding (NIST SP 800-63-3) without cloud biometric processing
+- **Government & public sector** — remote liveness proofing with auditable, open-source algorithms
 - **Healthcare** — patient verification where biometric data must stay on-device (HIPAA, GDPR)
 - **KYC/identity platforms** — add liveness without becoming a biometric data processor
 - **Researchers** — open-source reference implementation for presentation attack detection

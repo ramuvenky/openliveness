@@ -90,15 +90,15 @@ proof that a real human was verified on a real device.
 
 ## Packages
 
-| Package | Description |
-|---------|-------------|
-| `relay/` | Node.js WebSocket relay server |
-| `verify/` (`@openliveness/verify`) | Attestation JWT verification library |
-| `web-sdk/` (`@openliveness/web`) | Browser QR display + session polling |
-| `ios-sdk/` | Swift SDK for iPhone liveness + signing |
-| `android-sdk/` | Kotlin SDK for Android liveness + signing |
-| `core/` | Python reference algorithm implementations |
-| `benchmark/` | ISO/IEC 30107-3 evaluation harness |
+| Package | Description | Published as |
+|---------|-------------|--------------|
+| `relay/` | Node.js WebSocket relay server | self-host (`docker compose`) |
+| `verify/` | Attestation JWT verification | `npm i @openliveness/verify` |
+| `web-sdk/` | Browser QR display + session polling | `npm i @openliveness/web` |
+| `android-sdk/` | Kotlin SDK for Android phones | JitPack: `com.github.ramuvenky.openliveness:android-sdk:v0.1.0` |
+| `ios-sdk/` | Swift SDK for iPhones | Not yet published (blocked on Apple Developer enrollment) |
+| `core/` | Python reference algorithm implementations | In-repo only (research / contributor tooling) |
+| `benchmark/` | ISO/IEC 30107-3 evaluation harness | In-repo only (research / contributor tooling) |
 
 ---
 
@@ -128,8 +128,32 @@ const result = await verify({
 // result.token === JWT for your backend
 ```
 
+```kotlin
+// Your Android app — the phone side that scans the QR and runs liveness
+//
+// settings.gradle.kts:
+//   dependencyResolutionManagement {
+//     repositories { maven { url = uri("https://jitpack.io") } }
+//   }
+// app/build.gradle.kts:
+//   dependencies {
+//     implementation("com.github.ramuvenky.openliveness:android-sdk:v0.1.0")
+//   }
+
+import dev.openliveness.CDLSession
+import dev.openliveness.parseQRPayload
+
+val session = CDLSession(
+    payload = parseQRPayload(scannedQR),
+    context = context,
+    cloudProjectNumber = 123456789L,     // from Google Cloud Console; pass null to skip HW attestation
+)
+val response = session.start()           // suspend fun — call from a coroutine
+// response.accepted + response.attestationToken
+```
+
 ```typescript
-// Your backend
+// Your backend — verifies the JWT the browser forwards to you
 import { verifyAttestationJWT } from '@openliveness/verify';
 
 const result = await verifyAttestationJWT(token, {

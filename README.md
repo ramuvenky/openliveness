@@ -90,26 +90,35 @@ proof that a real human was verified on a real device.
 
 ## Packages
 
-| Package | Description |
-|---------|-------------|
-| `relay/` | Node.js WebSocket relay server |
-| `verify/` (`@openliveness/verify`) | Attestation JWT verification library |
-| `web-sdk/` (`@openliveness/web`) | Browser QR display + session polling |
-| `ios-sdk/` | Swift SDK for iPhone liveness + signing |
-| `android-sdk/` | Kotlin SDK for Android liveness + signing |
-| `core/` | Python reference algorithm implementations |
-| `benchmark/` | ISO/IEC 30107-3 evaluation harness |
+| Package | Description | Published as |
+|---------|-------------|--------------|
+| `relay/` | Node.js WebSocket relay server | self-host (`docker compose`) |
+| `verify/` | Attestation JWT verification | `npm i @openliveness/verify` |
+| `web-sdk/` | Browser QR display + session polling | `npm i @openliveness/web` |
+| `android-sdk/` | Kotlin SDK for Android phones | JitPack: `com.github.ramuvenky.openliveness:android-sdk:v0.1.0` |
+| `ios-sdk/` | Swift SDK for iPhones | Not yet published (blocked on Apple Developer enrollment) |
+| `core/` | Python reference algorithm implementations | In-repo only (research / contributor tooling) |
+| `benchmark/` | ISO/IEC 30107-3 evaluation harness | In-repo only (research / contributor tooling) |
 
 ---
 
 ## Quick Start
+
+First, run the relay yourself — it's a Node server in this repo:
+
+```bash
+cd relay && docker compose up -d
+# relay now listening on http://localhost:3000
+```
+
+Then integrate the SDKs into your app:
 
 ```typescript
 // Browser
 import { verify } from '@openliveness/web';
 
 const result = await verify({
-  relayUrl: 'relay.openliveness.dev',
+  relayUrl: 'localhost:3000',              // point at your deployed relay
   assuranceRequired: 'IAL2',
   onQRReady: (dataUrl) => { document.getElementById('qr').src = dataUrl; }
 });
@@ -119,12 +128,36 @@ const result = await verify({
 // result.token === JWT for your backend
 ```
 
+```kotlin
+// Your Android app — the phone side that scans the QR and runs liveness
+//
+// settings.gradle.kts:
+//   dependencyResolutionManagement {
+//     repositories { maven { url = uri("https://jitpack.io") } }
+//   }
+// app/build.gradle.kts:
+//   dependencies {
+//     implementation("com.github.ramuvenky.openliveness:android-sdk:v0.1.0")
+//   }
+
+import dev.openliveness.CDLSession
+import dev.openliveness.parseQRPayload
+
+val session = CDLSession(
+    payload = parseQRPayload(scannedQR),
+    context = context,
+    cloudProjectNumber = 123456789L,     // from Google Cloud Console; pass null to skip HW attestation
+)
+val response = session.start()           // suspend fun — call from a coroutine
+// response.accepted + response.attestationToken
+```
+
 ```typescript
-// Your backend
+// Your backend — verifies the JWT the browser forwards to you
 import { verifyAttestationJWT } from '@openliveness/verify';
 
 const result = await verifyAttestationJWT(token, {
-  relayUrl: 'relay.openliveness.dev',
+  relayUrl: 'localhost:3000',              // same relay as above
   audience: 'your-domain.com',
   requiredAssurance: 'IAL2'
 });
@@ -169,7 +202,7 @@ in any legal or technical sense.
 
 ## Documentation
 
-- [Full Technical Specification](docs/spec.md) — complete implementation guide (28 sections)
+- [Full Technical Specification](docs/Spec.md) — complete implementation guide (28 sections)
 - [Project Background](docs/background.md) — why this exists, what problem it solves
 - [Threat Model](protocol/ThreatModel.md) — what this protects against and what it does not
 - [Attestation Schema](protocol/AttestationSchema.json) — the shared interface contract
@@ -180,7 +213,11 @@ in any legal or technical sense.
 
 ## Status
 
-Active development. Version 0.1.0 target: end of Oct 2026.
+Active development. **v0.1.0 shipping now** (Android SDK via JitPack, `@openliveness/web` and `@openliveness/verify` on npm).
+
+iOS SDK sits in the repo but is not yet published — it's blocked on
+Apple Developer enrollment. Help on finishing that port is the
+highest-value contribution right now; see [CONTRIBUTING](CONTRIBUTING.md).
 
 This is a new project. There is no production deployment yet.
 Early adoption partnerships are actively sought.

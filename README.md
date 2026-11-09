@@ -219,7 +219,7 @@ in any legal or technical sense.
 
 ## Status
 
-Active development. **Shipping now**: Android SDK v0.1.1 on JitPack, `@openliveness/web` and `@openliveness/verify` v0.1.0 on npm.
+Active development. **Shipping now**: Android SDK v0.1.1 on JitPack, `@openliveness/web` and `@openliveness/verify` v0.1.1 on npm.
 
 iOS SDK sits in the repo but is not yet published — it's blocked on
 Apple Developer enrollment. Help on finishing that port is the

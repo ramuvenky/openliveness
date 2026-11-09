@@ -22,7 +22,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.ramuvenky.openliveness:android-sdk:v0.1.0")
+    implementation("com.github.ramuvenky:openliveness:v0.1.1")
 }
 ```
 
@@ -108,8 +108,9 @@ docker compose up -d
 
 ## Status
 
-v0.1.0 — first public cut. API surface is small and intentionally
-stable; breaking changes before 1.0 will be flagged in release notes.
+v0.1.1 — first public cut (v0.1.0 shipped under a mistaken coordinate
+and is superseded). API surface is small and intentionally stable;
+breaking changes before 1.0 will be flagged in release notes.
 
 ## License
 

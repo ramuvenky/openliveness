@@ -10,10 +10,12 @@ plugins {
 //      rootProject.name, version is ignored.
 //   2. JitPack release pipeline — on any pushed `v*` tag, JitPack runs
 //      `./gradlew publishToMavenLocal` and serves the resulting AAR at
-//      `com.github.ramuvenky.openliveness:android-sdk:<tag>`. Version
+//      `com.github.ramuvenky:openliveness:<tag>` (JitPack flattens
+//      single-module projects to groupId=com.github.<user>,
+//      artifactId=<repo>, ignoring the Gradle `group` below). Version
 //      here must match the tag minus the leading `v`.
 group = "dev.openliveness"
-version = "0.1.0"
+version = "0.1.1"
 
 android {
     namespace = "dev.openliveness"

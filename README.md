@@ -101,7 +101,7 @@ proof that a real human was verified on a real device.
 | `relay/` | Node.js WebSocket relay server | self-host (`docker compose`) |
 | `verify/` | Attestation JWT verification | `npm i @openliveness/verify` |
 | `web-sdk/` | Browser QR display + session polling | `npm i @openliveness/web` |
-| `android-sdk/` | Kotlin SDK for Android phones | JitPack: `com.github.ramuvenky.openliveness:android-sdk:v0.1.0` |
+| `android-sdk/` | Kotlin SDK for Android phones | JitPack: `com.github.ramuvenky:openliveness:v0.1.1` |
 | `ios-sdk/` | Swift SDK for iPhones | Not yet published (blocked on Apple Developer enrollment) |
 | `core/` | Python reference algorithm implementations | In-repo only (research / contributor tooling) |
 | `benchmark/` | ISO/IEC 30107-3 evaluation harness | In-repo only (research / contributor tooling) |
@@ -143,7 +143,7 @@ const result = await verify({
 //   }
 // app/build.gradle.kts:
 //   dependencies {
-//     implementation("com.github.ramuvenky.openliveness:android-sdk:v0.1.0")
+//     implementation("com.github.ramuvenky:openliveness:v0.1.1")
 //   }
 
 import dev.openliveness.CDLSession
@@ -219,7 +219,7 @@ in any legal or technical sense.
 
 ## Status
 
-Active development. **v0.1.0 shipping now** (Android SDK via JitPack, `@openliveness/web` and `@openliveness/verify` on npm).
+Active development. **Shipping now**: Android SDK v0.1.1 on JitPack, `@openliveness/web` and `@openliveness/verify` v0.1.0 on npm.
 
 iOS SDK sits in the repo but is not yet published — it's blocked on
 Apple Developer enrollment. Help on finishing that port is the

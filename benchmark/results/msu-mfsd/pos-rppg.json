@@ -1,0 +1,15 @@
+{
+  "apcer_at_default": 0.14166666666666666,
+  "apcer_at_optimal": 0.3,
+  "auc": 0.484375,
+  "bpcer_at_default": 0.925,
+  "bpcer_at_optimal": 0.625,
+  "dataset": "MSU-MFSD",
+  "default_threshold": 0.5,
+  "hter_at_default": 0.5333333333333333,
+  "hter_at_optimal": 0.4625,
+  "n_attack": 120,
+  "n_live": 40,
+  "n_samples": 160,
+  "optimal_threshold": 0.359540856610427
+}

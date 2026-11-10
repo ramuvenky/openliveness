@@ -32,7 +32,7 @@ from typing import Callable
 
 import numpy as np
 
-from .harness import Scorer
+from .harness import Scorer, VideoSample, VideoScorer
 
 
 # Canonical location of the TFLite artefact in the mono-repo. Exported
@@ -60,6 +60,12 @@ DEFAULT_LBP_SKLEARN_PATH = Path("core/models/lbp_classifier.pkl")
 # across LBP + Fourier means `SCORER_FACTORIES` stays a single flat
 # `dict[str, Callable[[Path | str], Scorer]]` without variance gymnastics.
 DEFAULT_FOURIER_PATH = Path("<fourier-has-no-model>")
+
+# Same sentinel pattern as Fourier — Layer 3 POS rPPG (Spec §1356-1405)
+# is a closed-form function of the RGB signal; no weights to load. The
+# CLI's `--model` lookup is uniform across frame-level and video-level
+# scorers so the placeholder lives in DEFAULT_MODEL_PATHS too.
+DEFAULT_POS_RPPG_PATH = Path("<pos-rppg-has-no-model>")
 
 
 def tflite_lbp_scorer(model_path: Path | str) -> Scorer:
@@ -216,10 +222,59 @@ def fourier_scorer(model_path: Path | str) -> Scorer:
     return score
 
 
-# Registry consumed by the CLI's `--scorer` choices. Keyed by the
-# string a user types; values are factories that accept a model path
-# and return a Scorer. Adding a new scorer means one entry here —
-# the CLI's argparse `choices=` picks it up automatically.
+def pos_rppg_scorer(model_path: Path | str) -> VideoScorer:
+    """Per-video Scorer wrapping `core.algorithms.layer3_rppg_pos.pos_rppg`.
+
+    Layer 3 operates on a temporal window (Spec §1356-1405) — a single
+    frame can't carry a pulse, so the scorer takes a `VideoSample` and
+    reads its pre-extracted `rgb_signal`. Maps the POS result dict to
+    a single `[0, 1]` score via the `confidence` field, which is
+    already in that range and anchored to the detection threshold the
+    mobile pipeline uses.
+
+    A `None` result from `pos_rppg` (clip too short for the minimum
+    capture window, degenerate signal, filter blow-up) maps to 0.0 —
+    matches the mobile Layer 3 "no pulse detected → attack" decision
+    rather than silently coercing to NaN or dropping the clip.
+
+    `model_path` is accepted for signature parity with the frame-level
+    factories and is ignored; POS owns no artefact to load. Raises
+    RuntimeError if scipy isn't importable — same lazy-import pattern
+    as the texture scorers.
+    """
+    try:
+        import scipy  # type: ignore  # noqa: F401 — presence check only
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError(
+            "pos_rppg_scorer requires scipy; "
+            "install core/requirements.txt before running the benchmark CLI."
+        ) from e
+    # Local import mirrors the Layer-4 scorers: a user without the
+    # Layer-3 module's dependencies gets the RuntimeError at scorer-build
+    # time, not at package import.
+    from core.algorithms.layer3_rppg_pos import pos_rppg
+
+    del model_path  # explicit: POS has no artefact to load
+
+    def score(sample: VideoSample) -> float:
+        # low_light=False matches the benchmark context — MSU-MFSD and
+        # the other research corpora are recorded under normal indoor
+        # lighting. Exposing the flag to the CLI is a future
+        # extension; the mobile side reads it from
+        # AmbientConditions.low_light_detected per frame.
+        result = pos_rppg(sample.rgb_signal, fs=sample.fps, low_light=False)
+        if result is None:
+            return 0.0
+        return float(result["confidence"])
+
+    return score
+
+
+# Registry consumed by the CLI's `--scorer` choices for FRAME-level
+# scorers. Keyed by the string a user types; values are factories that
+# accept a model path and return a Scorer. Adding a new frame scorer
+# means one entry here — the CLI's argparse `choices=` picks it up
+# automatically (unioned with VIDEO_SCORER_FACTORIES).
 SCORER_FACTORIES: dict[str, Callable[[Path | str], Scorer]] = {
     "tflite-lbp": tflite_lbp_scorer,
     "sklearn-lbp": sklearn_lbp_scorer,
@@ -227,22 +282,43 @@ SCORER_FACTORIES: dict[str, Callable[[Path | str], Scorer]] = {
 }
 
 
+# VIDEO-level scorer registry. Kept separate from `SCORER_FACTORIES`
+# because the input type differs (VideoSample vs np.ndarray frame) —
+# merging would force a union at the call site and lose the static
+# signature guarantee. The CLI knows which registry a `--scorer` name
+# lives in and dispatches to `run` vs `run_video` accordingly.
+VIDEO_SCORER_FACTORIES: dict[str, Callable[[Path | str], VideoScorer]] = {
+    "pos-rppg": pos_rppg_scorer,
+}
+
+
 # Default model path per scorer — looked up by the CLI when `--model`
-# is omitted. Keeps the "pass no --model and get a sensible default"
-# behaviour working for both TFLite and sklearn scorers without the
-# CLI needing to know which asset belongs to which backend. The
-# `fourier` entry is a sentinel because Fourier owns no model; see
-# `DEFAULT_FOURIER_PATH`'s comment for why we register it anyway.
+# is omitted. Covers both registries so the resolution rule is
+# uniform; sentinel paths for Fourier and pos-rppg reflect that
+# those scorers own no artefact. The dict is flat (not per-registry)
+# so a future refactor that moves a scorer between frame and video
+# modes doesn't need the CLI to re-point its lookup.
 DEFAULT_MODEL_PATHS: dict[str, Path] = {
     "tflite-lbp": DEFAULT_LBP_MODEL_PATH,
     "sklearn-lbp": DEFAULT_LBP_SKLEARN_PATH,
     "fourier": DEFAULT_FOURIER_PATH,
+    "pos-rppg": DEFAULT_POS_RPPG_PATH,
 }
 
 
 def available_scorers() -> list[str]:
-    """Sorted scorer names for argparse `choices=`. Sorted so `--help`
-    output is stable across Python versions (dict insertion order is
-    guaranteed since 3.7, but a sorted list is one less thing to argue
-    about in a reviewer's head)."""
-    return sorted(SCORER_FACTORIES.keys())
+    """Sorted scorer names from BOTH registries for argparse `choices=`.
+    Sorted so `--help` output is stable across Python versions (dict
+    insertion order is guaranteed since 3.7, but a sorted list is one
+    less thing to argue about in a reviewer's head)."""
+    return sorted(SCORER_FACTORIES.keys() | VIDEO_SCORER_FACTORIES.keys())
+
+
+def is_video_scorer(name: str) -> bool:
+    """True when `name` is registered as a video-level scorer.
+
+    CLI dispatch uses this to choose between the frame-level `run` and
+    the video-level `run_video` + matching dataset loader. Kept as a
+    tiny helper so the CLI doesn't have to reach into the registry
+    internals."""
+    return name in VIDEO_SCORER_FACTORIES

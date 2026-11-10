@@ -17,9 +17,13 @@ from benchmark.scorers import (
     DEFAULT_FOURIER_PATH,
     DEFAULT_LBP_MODEL_PATH,
     DEFAULT_MODEL_PATHS,
+    DEFAULT_POS_RPPG_PATH,
     SCORER_FACTORIES,
+    VIDEO_SCORER_FACTORIES,
     available_scorers,
     fourier_scorer,
+    is_video_scorer,
+    pos_rppg_scorer,
     tflite_lbp_scorer,
 )
 
@@ -137,3 +141,113 @@ def test_fourier_scorer_missing_cv2_raises_runtime_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "cv2", None)
     with pytest.raises(RuntimeError, match="requires opencv-python"):
         fourier_scorer("whatever.pkl")
+
+
+def test_registry_exposes_pos_rppg():
+    # Same pin as the frame-level scorers, but the video registry is
+    # the correct one to check — a rename landing here without updating
+    # the CLI dispatch would break `--scorer pos-rppg` silently.
+    assert "pos-rppg" in VIDEO_SCORER_FACTORIES
+    assert VIDEO_SCORER_FACTORIES["pos-rppg"] is pos_rppg_scorer
+
+
+def test_pos_rppg_registered_in_default_model_paths():
+    # Default-path lookup is shared across frame and video registries
+    # so the CLI can resolve `--model` uniformly. Missing entry would
+    # KeyError the user's run.
+    assert DEFAULT_MODEL_PATHS["pos-rppg"] == DEFAULT_POS_RPPG_PATH
+
+
+def test_is_video_scorer_distinguishes_registries():
+    # CLI dispatch hinges on this; a false negative on a video scorer
+    # name would route a VideoSample into the frame-level `run` and
+    # blow up at scorer-call time with a cryptic signature mismatch.
+    assert is_video_scorer("pos-rppg") is True
+    assert is_video_scorer("fourier") is False
+    assert is_video_scorer("tflite-lbp") is False
+
+
+def test_available_scorers_merges_both_registries():
+    # argparse's `--help` needs to see every registered scorer, not
+    # just the frame-level ones — a user who omits pos-rppg from the
+    # choices wouldn't be able to invoke it even though the factory
+    # exists.
+    names = available_scorers()
+    assert "pos-rppg" in names
+    assert "tflite-lbp" in names
+    assert "fourier" in names
+    assert names == sorted(names)
+
+
+def test_pos_rppg_scorer_missing_scipy_raises_runtime_error(monkeypatch):
+    # Mirrors the TF / cv2 lazy-import guards: a user without scipy
+    # installed gets a clean install hint instead of a bare ImportError
+    # from somewhere deep in the Butterworth filter path.
+    monkeypatch.setitem(sys.modules, "scipy", None)
+    with pytest.raises(RuntimeError, match="requires scipy"):
+        pos_rppg_scorer("whatever.pkl")
+
+
+def test_pos_rppg_scorer_short_signal_returns_zero():
+    # Below MIN_SAMPLES_NORMAL (300) → pos_rppg returns None → scorer
+    # maps to 0.0. This is the "no pulse detected → attack" convention
+    # the mobile Layer 3 enforces; a NaN leak here would silently
+    # corrupt the AUC calculation.
+    pytest.importorskip("scipy")
+    from benchmark.harness import VideoSample
+
+    import numpy as np
+
+    scorer = pos_rppg_scorer("ignored.pkl")
+    rgb = np.full((60, 3), 128.0)  # 2s at 30fps — way under MIN_SAMPLES
+    sample = VideoSample(rgb_signal=rgb, fps=30.0, label=1, source="short.mov")
+    assert scorer(sample) == 0.0
+
+
+def test_pos_rppg_scorer_synthetic_pulse_produces_nonzero_score():
+    # Inject a clean 1.2 Hz (72 bpm) sinusoid on the green channel —
+    # the dominant pulse channel in rPPG. The signal is well above the
+    # SNR_THRESHOLD_DB_NORMAL floor, so the scorer must return a
+    # strictly positive confidence. Catches regressions where the
+    # dict→scalar mapping (e.g., reading the wrong key) silently
+    # returns 0 on bona-fide clips.
+    pytest.importorskip("scipy")
+    from benchmark.harness import VideoSample
+
+    import numpy as np
+
+    fs = 30.0
+    n = 450  # 15s at 30fps — safely over MIN_SAMPLES_NORMAL
+    t = np.arange(n) / fs
+    # Byte-domain means, same unit as the real dataset tap (0..255).
+    # Pulse amplitude ~2 counts on a 128 baseline mimics a strong
+    # bona-fide signal without clipping the normalisation step.
+    pulse = 2.0 * np.sin(2.0 * np.pi * 1.2 * t)
+    rgb = np.stack(
+        [
+            np.full(n, 128.0),
+            128.0 + pulse,  # pulse on green
+            np.full(n, 128.0),
+        ],
+        axis=1,
+    )
+    scorer = pos_rppg_scorer("ignored.pkl")
+    sample = VideoSample(rgb_signal=rgb, fps=fs, label=1, source="synthetic.mov")
+    score = scorer(sample)
+    assert isinstance(score, float)
+    assert 0.0 < score <= 1.0
+
+
+def test_pos_rppg_scorer_degenerate_signal_returns_zero():
+    # Zero-mean on any channel → pos_rppg can't normalise → None →
+    # scorer returns 0.0. Protects against a black-frame capture or
+    # tracking failure injecting NaNs downstream.
+    pytest.importorskip("scipy")
+    from benchmark.harness import VideoSample
+
+    import numpy as np
+
+    scorer = pos_rppg_scorer("ignored.pkl")
+    rgb = np.zeros((450, 3))  # degenerate: zero means across every channel
+    sample = VideoSample(rgb_signal=rgb, fps=30.0, label=0, source="degenerate.mov")
+    assert scorer(sample) == 0.0

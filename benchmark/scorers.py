@@ -51,6 +51,16 @@ DEFAULT_LBP_MODEL_PATH = Path("android-sdk/src/main/assets/lbp_classifier.tflite
 # relevant on Catalina x86_64 where TF 2.14+ wheels don't exist.
 DEFAULT_LBP_SKLEARN_PATH = Path("core/models/lbp_classifier.pkl")
 
+# Sentinel for the Fourier scorer — the FFT ring-energy detector is a
+# closed-form function of the input frame (Spec §1424-1448), with no
+# trained weights to load. The CLI's uniform `--model` lookup expects
+# every registered scorer to have a default entry in DEFAULT_MODEL_PATHS,
+# so we register this placeholder and the factory accepts-and-ignores
+# whatever path the CLI resolves. Keeping the same factory signature
+# across LBP + Fourier means `SCORER_FACTORIES` stays a single flat
+# `dict[str, Callable[[Path | str], Scorer]]` without variance gymnastics.
+DEFAULT_FOURIER_PATH = Path("<fourier-has-no-model>")
+
 
 def tflite_lbp_scorer(model_path: Path | str) -> Scorer:
     """Load `lbp_classifier.tflite` and return a per-frame Scorer closure.
@@ -172,6 +182,40 @@ def sklearn_lbp_scorer(model_path: Path | str) -> Scorer:
     return score
 
 
+def fourier_scorer(model_path: Path | str) -> Scorer:
+    """Per-frame Scorer wrapping `core.algorithms.layer4_texture.fourier_score`.
+
+    Unlike the LBP scorers, this one owns no trained weights — the FFT
+    ring-energy detector is a closed-form function (Spec §1424-1448).
+    `model_path` is accepted for signature parity with the LBP factories
+    and is ignored; the CLI resolves it to `DEFAULT_FOURIER_PATH` when
+    the user omits `--model`, and the function below never reads it.
+
+    Raises:
+        RuntimeError: when opencv-python isn't importable — `fourier_score`
+            needs cv2 for the grayscale conversion path, so we surface
+            the same clear hint the LBP scorers emit.
+    """
+    try:
+        import cv2  # type: ignore  # noqa: F401 — presence check only
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError(
+            "fourier_scorer requires opencv-python; "
+            "install core/requirements.txt before running the benchmark CLI."
+        ) from e
+    # Local import mirrors the LBP factories: a user without the Layer-4
+    # module's dependencies gets the RuntimeError at scorer-build time,
+    # not at package import.
+    from core.algorithms.layer4_texture import fourier_score
+
+    del model_path  # explicit: Fourier has no artefact to load
+
+    def score(frame: np.ndarray) -> float:
+        return fourier_score(frame)
+
+    return score
+
+
 # Registry consumed by the CLI's `--scorer` choices. Keyed by the
 # string a user types; values are factories that accept a model path
 # and return a Scorer. Adding a new scorer means one entry here —
@@ -179,16 +223,20 @@ def sklearn_lbp_scorer(model_path: Path | str) -> Scorer:
 SCORER_FACTORIES: dict[str, Callable[[Path | str], Scorer]] = {
     "tflite-lbp": tflite_lbp_scorer,
     "sklearn-lbp": sklearn_lbp_scorer,
+    "fourier": fourier_scorer,
 }
 
 
 # Default model path per scorer — looked up by the CLI when `--model`
 # is omitted. Keeps the "pass no --model and get a sensible default"
 # behaviour working for both TFLite and sklearn scorers without the
-# CLI needing to know which asset belongs to which backend.
+# CLI needing to know which asset belongs to which backend. The
+# `fourier` entry is a sentinel because Fourier owns no model; see
+# `DEFAULT_FOURIER_PATH`'s comment for why we register it anyway.
 DEFAULT_MODEL_PATHS: dict[str, Path] = {
     "tflite-lbp": DEFAULT_LBP_MODEL_PATH,
     "sklearn-lbp": DEFAULT_LBP_SKLEARN_PATH,
+    "fourier": DEFAULT_FOURIER_PATH,
 }
 
 

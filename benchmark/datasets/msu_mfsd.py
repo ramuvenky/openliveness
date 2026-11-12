@@ -56,7 +56,7 @@ from typing import Iterator, Literal
 
 import numpy as np
 
-from benchmark.harness import Sample
+from benchmark.harness import Sample, VideoSample
 
 from ._base import _ResearchDataset, _RootSpec
 
@@ -304,3 +304,228 @@ def _crop_face_grayscale(
     crop = frame_bgr[top:bottom, left:right]
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     return cv2.resize(gray, (out_size, out_size))
+
+
+# Skin-ROI centroids expressed as fractions of the PittPatt bbox (x_frac
+# from left edge, y_frac from top edge). Chosen to approximate the
+# MediaPipe FaceMesh landmarks the mobile pipeline uses in
+# `Layer3RgbTap.SkinRegionExtractor`:
+#   forehead landmark 10  → upper midline        ≈ (0.5, 0.20)
+#   left cheek  101        → mid-left face         ≈ (0.30, 0.65)
+#   right cheek 330        → mid-right face mirror ≈ (0.70, 0.65)
+# The benchmark corpus only gives us bboxes (not landmarks), so we
+# can't bit-match the mobile ROI picks — these fractions reproduce
+# the same three broad-skin regions geometrically. Combined averaging
+# across all three (Spec §1364-1365) keeps the signal dataset-agnostic.
+_SKIN_ROI_CENTROIDS: tuple[tuple[float, float], ...] = (
+    (0.50, 0.20),  # forehead
+    (0.30, 0.65),  # left cheek
+    (0.70, 0.65),  # right cheek
+)
+
+# ROI half-side as a fraction of face-width — matches the mobile
+# `ROI_HALF_SIZE_FACE_WIDTH_FRAC = 0.05` so each benchmark ROI covers
+# roughly the same sliver of skin the phone would, scaled by whatever
+# face-width PittPatt tagged. 0.05 × 2 → a 10%-of-face square per ROI.
+_SKIN_ROI_HALF_SIZE_FRAC: float = 0.05
+
+
+def _mean_skin_rgb(
+    frame_bgr: np.ndarray,
+    bbox: tuple[int, int, int, int],
+) -> tuple[float, float, float] | None:
+    """BGR frame + PittPatt bbox → mean (R, G, B) across 3 skin ROIs.
+
+    Returns the *combined* mean (not three parallel ones) — matches
+    Spec §1364-1365 and the Kotlin `SkinRegionExtractor.meanSkinRgb`,
+    which builds a single Nx3 time series per session. Byte-domain
+    means (0..255), unscaled: `pos_rppg` divides by frame-mean itself,
+    so a scaled input would produce equivalent-looking but subtly
+    different results depending on the scale factor.
+
+    Returns None for degenerate boxes (zero-area, or every ROI clipped
+    off-frame) — caller drops the frame so a corrupt annotation can't
+    seed NaNs into the RGB stream.
+    """
+    left, top, right, bottom = bbox
+    h, w = frame_bgr.shape[:2]
+    left = max(0, left)
+    top = max(0, top)
+    right = min(w, right)
+    bottom = min(h, bottom)
+    if right <= left or bottom <= top:
+        return None
+    face_w = right - left
+    face_h = bottom - top
+    half = _SKIN_ROI_HALF_SIZE_FRAC * face_w
+    if half <= 0:
+        return None
+
+    sum_r = 0.0
+    sum_g = 0.0
+    sum_b = 0.0
+    count = 0
+    for cx_frac, cy_frac in _SKIN_ROI_CENTROIDS:
+        cx = left + cx_frac * face_w
+        cy = top + cy_frac * face_h
+        x0 = max(0, int(cx - half))
+        y0 = max(0, int(cy - half))
+        x1 = min(w, int(cx + half) + 1)
+        y1 = min(h, int(cy + half) + 1)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        # cv2 decodes BGR; index channels explicitly so R stays R even
+        # if a future refactor swaps the decoder.
+        roi = frame_bgr[y0:y1, x0:x1]
+        sum_b += float(roi[:, :, 0].sum())
+        sum_g += float(roi[:, :, 1].sum())
+        sum_r += float(roi[:, :, 2].sum())
+        count += roi.shape[0] * roi.shape[1]
+    if count == 0:
+        return None
+    return (sum_r / count, sum_g / count, sum_b / count)
+
+
+class MSUMFSDVideo(_ResearchDataset):
+    """Video-level loader that yields one `VideoSample` per clip.
+
+    Mirror of `MSUMFSD` (same filename convention, same `.face` sidecar
+    parsing, same train/test split filter), but the per-video loop
+    decodes EVERY frame at native fps — not 1 Hz — to produce the
+    `rgb_signal` Spec §1356-1405's POS detector needs. Memory stays
+    cheap because we average down to one (R, G, B) tuple per annotated
+    frame before yielding: a 12s/30fps clip is ~360 floats × 3, not
+    360 full-resolution frames.
+
+    Lives alongside `MSUMFSD` in this file rather than its own module
+    because the split-list + filename regex + `.face` parser are all
+    MSU-specific and splitting them across two files guarantees one
+    side eventually drifts.
+    """
+
+    name: str = "MSU-MFSD"
+    _SPEC = MSUMFSD._SPEC
+
+    def __init__(
+        self,
+        root: Path | str,
+        split: Literal["all", "train", "test"] = "all",
+    ) -> None:
+        """`split` semantics identical to `MSUMFSD` — the sub-list files
+        are the published MSU protocol and apply the same way whether
+        we iterate per-frame or per-video."""
+        super().__init__(root)
+        self._split = split
+        self._allowed_clients = _load_split_clients(self.root, split)
+
+    def __len__(self) -> int:
+        """Clip count (not frame count) — matches `n_samples` for a
+        video-level benchmark run. A split with zero videos returns 0
+        and lets the harness's empty-dataset guard fire cleanly."""
+        return sum(
+            1
+            for subdir in (self._live_dir, self._attack_dir)
+            for path in self._video_paths(subdir)
+            if _video_belongs_to_split(path, self._allowed_clients)
+        )
+
+    def __iter__(self) -> Iterator[VideoSample]:
+        yield from self._iter_split(self._live_dir, label=1)
+        yield from self._iter_split(self._attack_dir, label=0)
+
+    def _iter_split(self, split_dir: Path, label: int) -> Iterator[VideoSample]:
+        for video_path in self._video_paths(split_dir):
+            if not _video_belongs_to_split(video_path, self._allowed_clients):
+                continue
+            face_path = video_path.with_suffix(".face")
+            if not face_path.exists():
+                continue
+            face_boxes = _read_face_file(face_path)
+            sample = _rgb_signal_from_video(video_path, face_boxes, label)
+            # None → video couldn't open or no annotated frames landed
+            # on-skin. Skip rather than emit an empty signal — the
+            # harness would drop a zero-length signal as a single-point
+            # score anyway, and the dropped-clip count is traceable
+            # from the dataset len() vs scored-count gap in the report.
+            if sample is not None:
+                yield sample
+
+
+def _rgb_signal_from_video(
+    video_path: Path,
+    face_boxes: dict[int, tuple[int, int, int, int]],
+    label: int,
+) -> VideoSample | None:
+    """Decode every frame, extract 3-ROI mean RGB per annotated frame +
+    a 1 Hz-cadence face-crop stream, emit a single `VideoSample`.
+
+    Why both signals in one pass: the capture loop is the expensive
+    part (ProRes decode dominates at ~10× realtime on an SSD-bound
+    Catalina box). Extracting the 1 Hz 80×80 crops alongside the
+    per-frame RGB mean reuses the single decode, cutting combined
+    multi-layer benchmarks from ~2× cost to ~1×.
+
+    Crop cadence matches the Android `MediaPipeLandmarkStream`
+    FACE_CROP_INTERVAL_MS = 1000L — keeps the frame budget fed to
+    LBP/Fourier in the combined scorer exactly aligned with the
+    frame-level benchmark cadence, so AUC numbers remain
+    cross-comparable.
+
+    Local cv2 import so a user without opencv-python installed gets the
+    same clean RuntimeError the per-frame iterator raises; the module
+    stays importable for tests that don't touch real video.
+    """
+    try:
+        import cv2  # type: ignore
+    except ImportError as e:  # pragma: no cover
+        raise RuntimeError(
+            "MSUMFSDVideo __iter__ requires opencv-python; "
+            "install opencv-python-headless before running the benchmark CLI."
+        ) from e
+
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        if not cap.isOpened():
+            return None
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        # 1 Hz cadence per `_FRAME_INTERVAL_SECONDS` — `max(1, …)` so
+        # that even a hypothetical sub-1fps clip still emits something
+        # rather than dividing by zero in the modulo below.
+        crop_step = max(1, int(round(fps * _FRAME_INTERVAL_SECONDS)))
+
+        rgb_samples: list[tuple[float, float, float]] = []
+        frame_crops: list[np.ndarray] = []
+        idx = 0
+        while True:
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+            bbox = face_boxes.get(idx)
+            if bbox is not None:
+                rgb = _mean_skin_rgb(frame_bgr, bbox)
+                if rgb is not None:
+                    rgb_samples.append(rgb)
+                # 1 Hz crop cadence; same bbox-lookup so a frame that
+                # produced an RGB sample is also the one eligible for a
+                # face crop. Skipping on `None` matches the mobile "no
+                # face box → no score" contract.
+                if idx % crop_step == 0:
+                    crop = _crop_face_grayscale(frame_bgr, bbox, _FACE_OUT_SIZE)
+                    if crop is not None:
+                        frame_crops.append(crop)
+            idx += 1
+
+        if not rgb_samples:
+            return None
+
+        return VideoSample(
+            rgb_signal=np.asarray(rgb_samples, dtype=np.float64),
+            fps=fps,
+            label=label,
+            source=video_path.name,
+            # Tuple (not list) so the dataclass stays hashable-adjacent
+            # and a scorer can't mutate the sample's frames by accident.
+            frames=tuple(frame_crops),
+        )
+    finally:
+        cap.release()

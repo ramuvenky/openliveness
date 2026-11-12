@@ -21,7 +21,10 @@ from benchmark.harness import (
     DEFAULT_THRESHOLD,
     Dataset,
     Sample,
+    VideoDataset,
+    VideoSample,
     run,
+    run_video,
 )
 
 
@@ -200,3 +203,75 @@ def test_dataset_loader_iter_defers_until_decoder_is_wired(
     dataset = cls(tmp_path)
     with pytest.raises(NotImplementedError, match="frame-extraction"):
         next(iter(dataset))
+
+
+class FakeVideoDataset:
+    """Smallest thing that satisfies the VideoDataset protocol — a
+    handful of VideoSamples with scores baked into the RGB signal so
+    the identity scorer can read them back without running pos_rppg.
+    Parallels FakeDataset above; the shared shape is intentional."""
+
+    name = "FakeVideoCorpus"
+
+    def __init__(self, samples: list[VideoSample]) -> None:
+        self._samples = samples
+
+    def __iter__(self):
+        return iter(self._samples)
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+
+def _video_sample(score: float, label: int, source: str = "") -> VideoSample:
+    # Encode the "scorer output" inside the signal so the identity
+    # video-scorer can retrieve it without running real rPPG. The
+    # array shape is cheap but non-empty — matches what a real loader
+    # would produce.
+    return VideoSample(
+        rgb_signal=np.array([[score, score, score]], dtype=np.float64),
+        fps=30.0,
+        label=label,
+        source=source,
+    )
+
+
+def _identity_video_scorer(sample: VideoSample) -> float:
+    return float(sample.rgb_signal[0, 0])
+
+
+def test_run_video_produces_full_report():
+    # Mirror of test_run_produces_full_report_on_perfect_scores for
+    # the video path. Perfect separation → AUC 1, HTER 0 at both
+    # thresholds; identical report shape to the frame-level run().
+    dataset = FakeVideoDataset([
+        _video_sample(1.0, label=1, source="live-A"),
+        _video_sample(1.0, label=1, source="live-B"),
+        _video_sample(0.0, label=0, source="atk-A"),
+        _video_sample(0.0, label=0, source="atk-B"),
+    ])
+    report = run_video(dataset, _identity_video_scorer)
+
+    assert isinstance(report, BenchmarkReport)
+    assert report.dataset == "FakeVideoCorpus"
+    assert report.n_samples == 4
+    assert report.n_live == 2
+    assert report.n_attack == 2
+    assert report.auc == 1.0
+    assert report.hter_at_default == 0.0
+    assert report.hter_at_optimal == 0.0
+
+
+def test_run_video_rejects_empty_dataset():
+    # Same empty-dataset guard as run() — the video path must not
+    # silently emit a zero-sample report.
+    with pytest.raises(ValueError, match="is empty"):
+        run_video(FakeVideoDataset([]), _identity_video_scorer)
+
+
+def test_fake_video_dataset_satisfies_video_protocol():
+    # Keeps us honest: a change to the VideoDataset protocol that
+    # breaks the fake also breaks MSUMFSDVideo. runtime_checkable
+    # makes isinstance work here.
+    dataset = FakeVideoDataset([_video_sample(0.5, label=1)])
+    assert isinstance(dataset, VideoDataset)

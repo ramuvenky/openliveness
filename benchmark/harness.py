@@ -65,6 +65,49 @@ lbp_score`, or an ablation that uses a different layer entirely —
 without any changes to the harness."""
 
 
+@dataclass(frozen=True)
+class VideoSample:
+    """One video-level PAD evaluation input — Layer 3 (rPPG) needs the
+    full temporal signal from a single clip, not a single frame, so it
+    gets its own Sample type to keep the frame-level `Scorer` contract
+    unambiguous.
+
+    Attributes:
+        rgb_signal: (N, 3) float array of per-frame mean (R, G, B) over
+            the combined skin ROIs (forehead + both cheeks). Byte-domain
+            means (0..255), unscaled — matches the `RGBSample` units
+            the Android `Layer3RgbTap.kt` ships and what the Python
+            reference `pos_rppg(rgb_signal, …)` consumes directly.
+        fps: capture frame rate. The dataset loader derives this from
+            the container metadata; passed through so the scorer can
+            pin the FFT frequency axis.
+        label: 1 bona-fide / 0 attack, same convention as `Sample`.
+        source: provenance tag (video filename) kept for post-hoc
+            APCER-by-medium clustering.
+        frames: optional tuple of per-clip face crops (80×80 uint8
+            grayscale, 1 Hz cadence to match the mobile
+            `FACE_CROP_INTERVAL_MS`). Populated by the dataset loader
+            only when a multi-layer scorer needs them — pure-rPPG runs
+            skip the carry cost. A combined scorer that expects frames
+            but finds `None` should raise, not silently fall back:
+            that'd hide a dataset-config bug behind degraded numbers.
+    """
+
+    rgb_signal: np.ndarray
+    fps: float
+    label: int
+    source: str = ""
+    frames: tuple[np.ndarray, ...] | None = None
+
+
+VideoScorer = Callable[["VideoSample"], float]
+"""`(VideoSample) -> live-probability in [0, 1]`. Parallel to
+[`Scorer`][benchmark.harness.Scorer] but consumes a whole-video RGB
+signal — the smallest input that admits any pulse-detection scoring
+at all. Register under `benchmark.scorers.VIDEO_SCORER_FACTORIES` so
+the CLI can dispatch to [`run_video`][benchmark.harness.run_video]."""
+
+
 @runtime_checkable
 class Dataset(Protocol):
     """Iterable of [`Sample`][benchmark.harness.Sample]s plus bookkeeping.
@@ -77,6 +120,18 @@ class Dataset(Protocol):
 
     name: str
     def __iter__(self) -> Iterator[Sample]: ...
+    def __len__(self) -> int: ...
+
+
+@runtime_checkable
+class VideoDataset(Protocol):
+    """Iterable of [`VideoSample`][benchmark.harness.VideoSample]s. Mirror
+    of [`Dataset`][benchmark.harness.Dataset] for the video-level path —
+    one `VideoSample` per clip rather than one `Sample` per frame.
+    """
+
+    name: str
+    def __iter__(self) -> Iterator["VideoSample"]: ...
     def __len__(self) -> int: ...
 
 
@@ -132,11 +187,43 @@ def run(dataset: Dataset, scorer: Scorer) -> BenchmarkReport:
         scores.append(float(scorer(sample.frame)))
         labels.append(int(sample.label))
 
+    return _build_report(dataset.name, scores, labels)
+
+
+def run_video(dataset: VideoDataset, scorer: VideoScorer) -> BenchmarkReport:
+    """Video-level twin of [`run`][benchmark.harness.run].
+
+    One `scorer()` invocation per clip (not per frame) — necessary for
+    Layer 3 rPPG, where the pulse FFT only makes sense over a temporal
+    window. Report shape is identical to the frame-level path so
+    downstream tooling (JSON dumps, paper tables) doesn't need to
+    discriminate.
+
+    Raises:
+        ValueError: when the dataset is empty, or the collected labels
+            are single-class (propagated from `compute_metrics` /
+            `sweep_threshold`).
+    """
+    if len(dataset) == 0:
+        raise ValueError(f"dataset {dataset.name!r} is empty — nothing to score")
+
+    scores: list[float] = []
+    labels: list[int] = []
+    for sample in dataset:
+        scores.append(float(scorer(sample)))
+        labels.append(int(sample.label))
+
+    return _build_report(dataset.name, scores, labels)
+
+
+def _build_report(name: str, scores: list[float], labels: list[int]) -> BenchmarkReport:
+    # Shared assembly used by both run() and run_video(). Lives here
+    # so a future change to the report fields (e.g. adding EER)
+    # doesn't need two parallel edits that could drift.
     swept = sweep_threshold(scores, labels)
     default = compute_metrics(scores, labels, threshold=DEFAULT_THRESHOLD)
-
     return BenchmarkReport(
-        dataset=dataset.name,
+        dataset=name,
         n_samples=len(scores),
         n_live=sum(1 for lbl in labels if lbl == 1),
         n_attack=sum(1 for lbl in labels if lbl == 0),

@@ -21,11 +21,17 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from .datasets.msu_mfsd import MSUMFSD
+from .datasets.msu_mfsd import MSUMFSD, MSUMFSDVideo
 from .datasets.oulu_npu import OuluNPU
 from .datasets.replay_attack import ReplayAttack
-from .harness import Dataset, run
-from .scorers import DEFAULT_MODEL_PATHS, SCORER_FACTORIES, available_scorers
+from .harness import Dataset, VideoDataset, run, run_video
+from .scorers import (
+    DEFAULT_MODEL_PATHS,
+    SCORER_FACTORIES,
+    VIDEO_SCORER_FACTORIES,
+    available_scorers,
+    is_video_scorer,
+)
 
 
 # Registry keyed by the string a user types for `--dataset`. Values
@@ -37,6 +43,16 @@ DATASET_LOADERS: dict[str, Callable[[Path], Dataset]] = {
     "msu-mfsd": MSUMFSD,
     "replay-attack": ReplayAttack,
     "oulu-npu": OuluNPU,
+}
+
+
+# Parallel registry for video-level loaders. Only MSU-MFSD is wired
+# today because it's the only corpus with per-frame bbox sidecars that
+# make the ROI-averaging deterministic without re-running face
+# detection in Python. REPLAY-ATTACK and OULU-NPU stay frame-only
+# until a loader lands that owns the bbox/landmark extraction.
+VIDEO_DATASET_LOADERS: dict[str, Callable[[Path], VideoDataset]] = {
+    "msu-mfsd": MSUMFSDVideo,
 }
 
 
@@ -104,16 +120,38 @@ def main(argv: list[str] | None = None) -> int:
     model_path = args.model if args.model is not None else DEFAULT_MODEL_PATHS[args.scorer]
 
     try:
-        # --split only means something to MSU-MFSD today; other loaders
-        # ignore the kwarg. Pass it through conditionally so we don't
-        # force the other two constructors to accept a param they
-        # don't honour.
-        if args.dataset == "msu-mfsd":
-            dataset = DATASET_LOADERS[args.dataset](args.dataset_root, split=args.split)
+        # Dispatch on scorer kind: video-level scorers (Layer 3 rPPG)
+        # consume one VideoSample per clip, frame-level (Layer 4) one
+        # Sample per frame. Dataset loader and harness runner pair up
+        # accordingly so the harness never sees a type it can't score.
+        if is_video_scorer(args.scorer):
+            video_loader = VIDEO_DATASET_LOADERS.get(args.dataset)
+            if video_loader is None:
+                # Explicit error over KeyError — tells the user *why*
+                # the combo is disallowed, not just which lookup missed.
+                raise ValueError(
+                    f"scorer {args.scorer!r} is video-level but dataset "
+                    f"{args.dataset!r} has no video loader. "
+                    f"Video loaders available for: "
+                    f"{sorted(VIDEO_DATASET_LOADERS.keys())}."
+                )
+            if args.dataset == "msu-mfsd":
+                dataset = video_loader(args.dataset_root, split=args.split)
+            else:
+                dataset = video_loader(args.dataset_root)
+            scorer = VIDEO_SCORER_FACTORIES[args.scorer](model_path)
+            report = run_video(dataset, scorer)
         else:
-            dataset = DATASET_LOADERS[args.dataset](args.dataset_root)
-        scorer = SCORER_FACTORIES[args.scorer](model_path)
-        report = run(dataset, scorer)
+            # --split only means something to MSU-MFSD today; other
+            # loaders ignore the kwarg. Pass it through conditionally
+            # so we don't force the other two constructors to accept a
+            # param they don't honour.
+            if args.dataset == "msu-mfsd":
+                dataset = DATASET_LOADERS[args.dataset](args.dataset_root, split=args.split)
+            else:
+                dataset = DATASET_LOADERS[args.dataset](args.dataset_root)
+            scorer = SCORER_FACTORIES[args.scorer](model_path)
+            report = run(dataset, scorer)
     except (FileNotFoundError, RuntimeError, ValueError) as e:
         # One exit path for every "config is wrong / corpus is missing"
         # failure. Stderr so a `--help | less`-style user doesn't see

@@ -212,6 +212,7 @@ in any legal or technical sense.
 - [Project Background](docs/background.md) — why this exists, what problem it solves
 - [Threat Model](protocol/ThreatModel.md) — what this protects against and what it does not
 - [Attestation Schema](protocol/AttestationSchema.json) — the shared interface contract
+- [Benchmarks](benchmark/README.md) — ISO/IEC 30107-3 numbers on MSU-MFSD, reproducible from source
 - [Contributing](CONTRIBUTING.md) — how to help, with iOS SDK as the highest-value onramp
 - [Security](SECURITY.md) — how to report vulnerabilities privately
 

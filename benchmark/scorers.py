@@ -270,6 +270,79 @@ def pos_rppg_scorer(model_path: Path | str) -> VideoScorer:
     return score
 
 
+def combined_scorer(model_path: Path | str) -> VideoScorer:
+    """Fuses Layer 3 (pos-rppg) + Layer 4 (LBP + Fourier) into one score.
+
+    Mirror of the mobile orchestrator's job: each layer is a weak,
+    independent signal; the deployed decision comes from fusing them.
+    For the benchmark we fuse *per clip* so a single VideoSample
+    produces a single score — directly comparable with pos-rppg and
+    with an aggregated per-frame scorer, and the number that answers
+    "what does the layered system actually score on this corpus?".
+
+    Fusion rule: equal-weighted mean of three per-clip terms
+        1. mean of per-frame LBP scores across the clip's `frames`
+        2. mean of per-frame Fourier scores across the clip's `frames`
+        3. pos-rppg `confidence` on the clip's `rgb_signal`
+    Equal weights (1/3 each) because we have no held-out calibration
+    split on MSU-MFSD for v0.1 — the paper table reports this fusion
+    as the honest "no-tuning" baseline. A future calibration pass can
+    swap in AUC-weighted or logistic-regression weights without
+    changing the harness contract.
+
+    `model_path` is the LBP TFLite artefact — Fourier and pos-rppg own
+    no weights so they ignore it. Defaults via DEFAULT_MODEL_PATHS to
+    the shipped `android-sdk/src/main/assets/lbp_classifier.tflite`.
+
+    Raises:
+        RuntimeError: any of the underlying lazy imports (tensorflow,
+            opencv-python, scipy) are missing — the failing factory's
+            diagnostic bubbles up unchanged so the install hint matches
+            the actual missing package.
+        ValueError: when a VideoSample arrives with `frames=None` —
+            the combined scorer needs frame crops and silently falling
+            back to rPPG-only would hide a dataset-config bug behind
+            degraded numbers.
+    """
+    # Build the three underlying scorers eagerly — any missing-dep /
+    # missing-model failure surfaces here, before the harness starts
+    # churning through clips. Matches the LBP/Fourier/pos-rppg factory
+    # contract: setup errors at scorer-build time, scoring errors at
+    # invoke time.
+    lbp = tflite_lbp_scorer(model_path)
+    fourier = fourier_scorer(model_path)  # model_path ignored by Fourier
+    rppg = pos_rppg_scorer(model_path)  # model_path ignored by pos-rppg
+
+    def score(sample: VideoSample) -> float:
+        if sample.frames is None or len(sample.frames) == 0:
+            raise ValueError(
+                "combined_scorer requires VideoSample.frames to be populated "
+                "(got None or empty). The dataset loader should emit a 1 Hz "
+                "stream of 80×80 face crops alongside rgb_signal — see "
+                "MSUMFSDVideo for the reference implementation."
+            )
+        # np.mean over a Python list of floats is fine; the frame loop
+        # dominates per-clip cost (TFLite invoke × N frames) so a
+        # numpy-array detour wouldn't move the needle.
+        lbp_scores = [lbp(frame) for frame in sample.frames]
+        fourier_scores = [fourier(frame) for frame in sample.frames]
+        rppg_score = rppg(sample)
+        return (
+            float(np.mean(lbp_scores))
+            + float(np.mean(fourier_scores))
+            + rppg_score
+        ) / 3.0
+
+    return score
+
+
+# Sentinel reuse: combined_scorer's "model" is the LBP TFLite. The
+# lookup in DEFAULT_MODEL_PATHS resolves to the same canonical path
+# as `tflite-lbp`, so a user who runs `--scorer combined` without
+# `--model` gets the shipped weights automatically.
+# No new constant needed — just register the lookup below.
+
+
 # Registry consumed by the CLI's `--scorer` choices for FRAME-level
 # scorers. Keyed by the string a user types; values are factories that
 # accept a model path and return a Scorer. Adding a new frame scorer
@@ -289,6 +362,7 @@ SCORER_FACTORIES: dict[str, Callable[[Path | str], Scorer]] = {
 # lives in and dispatches to `run` vs `run_video` accordingly.
 VIDEO_SCORER_FACTORIES: dict[str, Callable[[Path | str], VideoScorer]] = {
     "pos-rppg": pos_rppg_scorer,
+    "combined": combined_scorer,
 }
 
 
@@ -303,6 +377,10 @@ DEFAULT_MODEL_PATHS: dict[str, Path] = {
     "sklearn-lbp": DEFAULT_LBP_SKLEARN_PATH,
     "fourier": DEFAULT_FOURIER_PATH,
     "pos-rppg": DEFAULT_POS_RPPG_PATH,
+    # Reuses the LBP path: combined_scorer's only trained artefact is
+    # the TFLite classifier; Fourier + pos-rppg own no weights so the
+    # single path covers both frame-level model-loading needs.
+    "combined": DEFAULT_LBP_MODEL_PATH,
 }
 
 

@@ -84,12 +84,20 @@ class VideoSample:
         label: 1 bona-fide / 0 attack, same convention as `Sample`.
         source: provenance tag (video filename) kept for post-hoc
             APCER-by-medium clustering.
+        frames: optional tuple of per-clip face crops (80×80 uint8
+            grayscale, 1 Hz cadence to match the mobile
+            `FACE_CROP_INTERVAL_MS`). Populated by the dataset loader
+            only when a multi-layer scorer needs them — pure-rPPG runs
+            skip the carry cost. A combined scorer that expects frames
+            but finds `None` should raise, not silently fall back:
+            that'd hide a dataset-config bug behind degraded numbers.
     """
 
     rgb_signal: np.ndarray
     fps: float
     label: int
     source: str = ""
+    frames: tuple[np.ndarray, ...] | None = None
 
 
 VideoScorer = Callable[["VideoSample"], float]

@@ -456,8 +456,20 @@ def _rgb_signal_from_video(
     face_boxes: dict[int, tuple[int, int, int, int]],
     label: int,
 ) -> VideoSample | None:
-    """Decode every frame, extract 3-ROI mean RGB per annotated frame,
-    emit a single `VideoSample`.
+    """Decode every frame, extract 3-ROI mean RGB per annotated frame +
+    a 1 Hz-cadence face-crop stream, emit a single `VideoSample`.
+
+    Why both signals in one pass: the capture loop is the expensive
+    part (ProRes decode dominates at ~10× realtime on an SSD-bound
+    Catalina box). Extracting the 1 Hz 80×80 crops alongside the
+    per-frame RGB mean reuses the single decode, cutting combined
+    multi-layer benchmarks from ~2× cost to ~1×.
+
+    Crop cadence matches the Android `MediaPipeLandmarkStream`
+    FACE_CROP_INTERVAL_MS = 1000L — keeps the frame budget fed to
+    LBP/Fourier in the combined scorer exactly aligned with the
+    frame-level benchmark cadence, so AUC numbers remain
+    cross-comparable.
 
     Local cv2 import so a user without opencv-python installed gets the
     same clean RuntimeError the per-frame iterator raises; the module
@@ -476,8 +488,13 @@ def _rgb_signal_from_video(
         if not cap.isOpened():
             return None
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        # 1 Hz cadence per `_FRAME_INTERVAL_SECONDS` — `max(1, …)` so
+        # that even a hypothetical sub-1fps clip still emits something
+        # rather than dividing by zero in the modulo below.
+        crop_step = max(1, int(round(fps * _FRAME_INTERVAL_SECONDS)))
 
-        samples: list[tuple[float, float, float]] = []
+        rgb_samples: list[tuple[float, float, float]] = []
+        frame_crops: list[np.ndarray] = []
         idx = 0
         while True:
             ok, frame_bgr = cap.read()
@@ -487,17 +504,28 @@ def _rgb_signal_from_video(
             if bbox is not None:
                 rgb = _mean_skin_rgb(frame_bgr, bbox)
                 if rgb is not None:
-                    samples.append(rgb)
+                    rgb_samples.append(rgb)
+                # 1 Hz crop cadence; same bbox-lookup so a frame that
+                # produced an RGB sample is also the one eligible for a
+                # face crop. Skipping on `None` matches the mobile "no
+                # face box → no score" contract.
+                if idx % crop_step == 0:
+                    crop = _crop_face_grayscale(frame_bgr, bbox, _FACE_OUT_SIZE)
+                    if crop is not None:
+                        frame_crops.append(crop)
             idx += 1
 
-        if not samples:
+        if not rgb_samples:
             return None
 
         return VideoSample(
-            rgb_signal=np.asarray(samples, dtype=np.float64),
+            rgb_signal=np.asarray(rgb_samples, dtype=np.float64),
             fps=fps,
             label=label,
             source=video_path.name,
+            # Tuple (not list) so the dataclass stays hashable-adjacent
+            # and a scorer can't mutate the sample's frames by accident.
+            frames=tuple(frame_crops),
         )
     finally:
         cap.release()

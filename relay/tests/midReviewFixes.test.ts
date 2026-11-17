@@ -173,6 +173,25 @@ describe('L2 — ambient_conditions passthrough vs layer_scores strict', () => {
   });
 });
 
+// v0.2.0 stub-removal follow-up: challenge_response used to carry a
+// `.min(1)` constraint that short-circuited timed-out / zero-progress runs
+// into ERR_SCHEMA_INVALID at the zod boundary before checkChallenge could
+// produce the semantic ERR_CHALLENGE_MISMATCH. Before the stub path was
+// removed, the stub flow fabricated completed=true so this edge never
+// fired; now that real detectors drive every run, the schema must accept
+// empty-string so verify.ts owns the rejection.
+describe('challenge_response accepts empty + partial strings', () => {
+  it('schema parses challenge_response = "" (zero-progress run)', async () => {
+    const att = await makeAttestation({ challenge_response: '' });
+    expect(attestationSchema.safeParse(att).success).toBe(true);
+  });
+
+  it('schema parses a partial challenge_response ("blink" of blink,look_left,smile)', async () => {
+    const att = await makeAttestation({ challenge_response: 'blink' });
+    expect(attestationSchema.safeParse(att).success).toBe(true);
+  });
+});
+
 describe('M8 — sanitizeClientMessage', () => {
   it('passes through a benign validation message unchanged', () => {
     expect(sanitizeClientMessage('body/relying_party Required')).toBe('body/relying_party Required');

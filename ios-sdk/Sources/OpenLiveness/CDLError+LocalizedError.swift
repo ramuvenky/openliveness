@@ -28,14 +28,6 @@ extension CDLError: LocalizedError {
             return "This CDL session has expired. Scan a fresh QR code."
         case .cameraPermissionDenied:
             return "Camera permission denied. Enable it in Settings and retry."
-        case .stubModeDisallowed:
-            // The error exists specifically so a Release integrator who forgets
-            // to inject a landmark stream fails LOUDLY. The message points them
-            // at the two legitimate escapes so triage doesn't require reading
-            // CDLSession source.
-            return "Liveness cannot run: no landmark stream was provided and " +
-                "allowStubMode is false. Pass a LandmarkStream or set " +
-                "allowStubMode: true (dev harnesses only)."
         }
     }
 }

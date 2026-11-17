@@ -12,9 +12,6 @@ import io.mockk.unmockkObject
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertNotNull
-import org.junit.jupiter.api.Assertions.assertNull
-import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -59,7 +56,7 @@ class AttestationBuilderTest {
         assertEquals("v", obj.getString("k"))
     }
 
-    private fun stubSession(): CDLSession {
+    private fun fakeSession(): CDLSession {
         val payload = QRPayload(
             session_id = "s1",
             challenge_id = "c1",
@@ -69,17 +66,51 @@ class AttestationBuilderTest {
             expires_at = "2099-01-01T00:00:00Z",
             version = "1.0"
         )
-        return CDLSession(payload, context, playIntegrity = mockk(relaxed = true))
+        val (stream, layer3, layer4) = fakeWiring()
+        return CDLSession(
+            payload = payload,
+            context = context,
+            playIntegrity = mockk(relaxed = true),
+            landmarkStream = stream,
+            layer3 = layer3,
+            layer4 = layer4,
+        )
     }
+
+    // Neutral score fixture. Replaces the historical stubLayerScores()
+    // helper — tests that need custom values override individual fields
+    // via .copy().
+    private fun neutralScores(): LayerScores = LayerScores(
+        layer2ChallengeCompleted = true,
+        layer2ChallengeScore = 0.85f,
+        layer3PulseDetected = true,
+        layer3BpmInRange = true,
+        layer3RppgConfidence = 0.85f,
+        layer4LbpScore = 0.85f,
+        layer4FourierScore = 0.85f,
+        layer5BehavioralScore = 0.85f,
+        layer5MicrosaccadeDetected = true,
+    )
+
+    private fun completedResult(): ChallengeResult = ChallengeResult(
+        completed = true,
+        score = 1.0f,
+        elapsedSeconds = 0.1,
+        stepsCompleted = 1,
+        totalSteps = 1,
+        firedSteps = listOf(Challenge.BLINK),
+    )
 
     // H1 drift test — no device attestation → software_only + unsupported.
     @Test
     fun `builder stamps software_only and hw_attestation_status=unsupported when no deviceAttestation`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = completedResult(),
             deviceAttestation = null,
         )
         val obj = JSONObject(bytes.toString(Charsets.UTF_8))
@@ -93,9 +124,11 @@ class AttestationBuilderTest {
     fun `builder stamps IAL2 and hw_attestation_status=ok when deviceAttestation present`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = completedResult(),
             deviceAttestation = "stub-play-integrity-token",
         )
         val obj = JSONObject(bytes.toString(Charsets.UTF_8))
@@ -105,16 +138,15 @@ class AttestationBuilderTest {
     }
 
     // H1 drift test — explicit `failed` status survives into the output.
-    // This is the downgrade-attack signal; a regression collapsing it back
-    // into `unsupported` or dropping it entirely would mask forced
-    // downgrades on the server side.
     @Test
     fun `builder preserves explicit hw_attestation_status=failed`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = completedResult(),
             deviceAttestation = null,
             hwAttestationStatus = CDLSession.HwStatus.FAILED,
         )
@@ -123,47 +155,22 @@ class AttestationBuilderTest {
         assertEquals("failed", obj.getString("hw_attestation_status"))
     }
 
-    // H3 drift test — explicit livenessDecision wins over the computed stub.
-    // Load-bearing because a signed client data (future Phase 2+ platforms,
-    // iOS App Attest) uses the same string; the builder must not recompute.
+    // The livenessDecision parameter must be echoed verbatim into the
+    // output — load-bearing because any signed client-data envelope
+    // (iOS App Attest, future Android remote attestation) is computed
+    // over the same string.
     @Test
-    fun `builder uses explicit livenessDecision when provided`() {
+    fun `builder uses explicit livenessDecision verbatim`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(), // would compute "pass"
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
             livenessDecision = "fail",
+            challengeResult = completedResult(),
         )
         val obj = JSONObject(bytes.toString(Charsets.UTF_8))
         assertEquals("fail", obj.getString("liveness_decision"))
-    }
-
-    // H3 drift test — pure helper. Flipping layer2ChallengeCompleted flips
-    // the decision; locking this prevents a silent rule change that would
-    // leave the device-signed assertion and the posted attestation
-    // disagreeing on the same input.
-    @Test
-    fun `stubLivenessDecision returns pass or fail based on layer2 completion`() {
-        val scores = AttestationBuilder.stubLayerScores()
-        assertEquals("pass", AttestationBuilder.stubLivenessDecision(scores))
-        scores.layer2ChallengeCompleted = false
-        assertEquals("fail", AttestationBuilder.stubLivenessDecision(scores))
-    }
-
-    // S-1 drift guard — the stub layer scores MUST compose with the real
-    // LivenessOrchestrator to produce "pass" (not inconclusive/fail). If a
-    // future tuning of weights or thresholds breaks that, the Phase-1 e2e
-    // relay tests that still take the stub path would start failing with
-    // the diagnostic buried in the server response. Locking this here
-    // catches the drift at Android-SDK unit-test time, where the fix
-    // (bump the stub scores OR adjust the orchestrator) is obvious.
-    @Test
-    fun `stub layer scores compose with real orchestrator to decision=pass`() {
-        val stub = AttestationBuilder.stubLayerScores()
-        val outcome = LivenessOrchestrator().orchestrate(stub, AmbientConditions())
-        assertEquals("pass", outcome.decision,
-            "stub scores drifted below pass threshold — stub e2e path would start failing")
     }
 
     // Mirror of iOS testAttestationBuilderReturnsCanonicalBytes: the first
@@ -173,9 +180,11 @@ class AttestationBuilderTest {
     fun `builder output is canonical JSON bytes`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = completedResult(),
         )
         val str = bytes.toString(Charsets.UTF_8)
         assertTrue(str.startsWith("""{"ambient_conditions":"""),
@@ -198,15 +207,16 @@ class AttestationBuilderTest {
     // emit IAL2. The real CDLSession.start flow cannot produce this pair,
     // but direct AttestationBuilder.build callers (tests, future
     // orchestrators) could; without this guard the SDK would hand out an
-    // attestation the relay's checkAssurance invariant rejects. Pessimistic
-    // defaulting to software_only keeps the on-wire output honest.
+    // attestation the relay's checkAssurance invariant rejects.
     @Test
     fun `builder emits software_only when deviceAttestation present but status is FAILED`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = completedResult(),
             deviceAttestation = "stub-play-integrity-token",
             hwAttestationStatus = CDLSession.HwStatus.FAILED,
         )
@@ -216,79 +226,37 @@ class AttestationBuilderTest {
     }
 
     // M-1 pessimism — status OK but no deviceAttestation to back it up.
-    // The token-less OK claim is nonsense (the server has nothing to verify)
-    // so the builder downgrades to software_only here rather than passing
-    // the inconsistency through for the server to reject at checkAssurance.
     @Test
     fun `builder emits software_only when status is OK but deviceAttestation is null`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = completedResult(),
             deviceAttestation = null,
             hwAttestationStatus = CDLSession.HwStatus.OK,
         )
         val obj = JSONObject(bytes.toString(Charsets.UTF_8))
         assertEquals("software_only", obj.getString("assurance_level"))
-        // The status field itself is preserved verbatim — the pessimism only
-        // kicks in on assurance_level. Preserving the raw status keeps the
-        // caller-reported value visible on the wire for triage.
         assertEquals("ok", obj.getString("hw_attestation_status"))
-    }
-
-    // S-NEW-2 (c) — the on-wire stub_mode marker. Defaults to false so a
-    // caller that forgets to stamp it doesn't accidentally pass as "stub"
-    // on the server. The CDLSession.start path flips this to true when
-    // the Phase-1 stub liveness ran (challengeResult == null); the server
-    // enforces policy on this field, so a regression that stops emitting
-    // it (or hardcodes false) would silently let the stub path reach
-    // production.
-    @Test
-    fun `builder stamps stub_mode=false by default`() {
-        val bytes = AttestationBuilder.build(
-            context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
-            ambient = AmbientConditions(),
-        )
-        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
-        assertTrue(obj.has("stub_mode"), "stub_mode field must be present on every attestation")
-        assertFalse(obj.getBoolean("stub_mode"),
-            "default stub_mode must be false — opt-in only, never on by default")
-    }
-
-    @Test
-    fun `builder stamps stub_mode=true when caller sets it`() {
-        val bytes = AttestationBuilder.build(
-            context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
-            ambient = AmbientConditions(),
-            stubMode = true,
-        )
-        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
-        assertTrue(obj.getBoolean("stub_mode"),
-            "stub_mode must be true on the wire when the SDK ran the stub path")
     }
 
     // C-1 — assurance_level must downgrade to software_only when the
     // orchestrator decided `fail` or `inconclusive`, even if hw
-    // attestation succeeded. Before the fix the builder emitted "IAL2"
-    // off (deviceAttestation != null && hwOk) alone — i.e. an attestation
-    // claiming the strongest assurance level while the SDK's own
-    // liveness decision was `fail`. The relay's checkAssurance also
-    // rejects that pair, but we belt-and-suspenders at the SDK layer
-    // so direct callers can't emit the self-contradicting attestation.
+    // attestation succeeded. Belt-and-suspenders at the SDK layer so
+    // direct callers can't emit the self-contradicting attestation.
     @Test
     fun `assurance_level downgrades to software_only when livenessDecision is fail even if hw ok`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
             deviceAttestation = "stub-token",
             livenessDecision = "fail",
+            challengeResult = completedResult(),
             hwAttestationStatus = CDLSession.HwStatus.OK,
         )
         val obj = JSONObject(bytes.toString(Charsets.UTF_8))
@@ -301,62 +269,21 @@ class AttestationBuilderTest {
     fun `assurance_level downgrades to software_only when livenessDecision is inconclusive even if hw ok`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
             deviceAttestation = "stub-token",
             livenessDecision = "inconclusive",
+            challengeResult = completedResult(),
             hwAttestationStatus = CDLSession.HwStatus.OK,
         )
         val obj = JSONObject(bytes.toString(Charsets.UTF_8))
         assertEquals("software_only", obj.getString("assurance_level"))
     }
 
-    // H-1 — a caller that has a real `challengeResult` MUST also pass an
-    // explicit `livenessDecision`. The old default routed through
-    // `stubLivenessDecision` which only inspects layer 2; a catastrophic
-    // layer-3/4/5 score would silently become "pass" on the wire.
-    @Test
-    fun `builder throws when challengeResult is provided without livenessDecision`() {
-        val result = ChallengeResult(
-            completed = true,
-            score = 1.0f,
-            elapsedSeconds = 0.1,
-            stepsCompleted = 1,
-            totalSteps = 1,
-            firedSteps = listOf(Challenge.BLINK)
-        )
-        assertThrows(IllegalArgumentException::class.java) {
-            AttestationBuilder.build(
-                context = context,
-                session = stubSession(),
-                layerScores = AttestationBuilder.stubLayerScores(),
-                ambient = AmbientConditions(),
-                challengeResult = result,
-                // livenessDecision deliberately omitted
-            )
-        }
-    }
-
-    // H-1 pair — null challengeResult + null livenessDecision keeps the
-    // Phase-1 stub path alive (e2e CI still routes through this).
-    @Test
-    fun `builder falls back to stub decision when both challengeResult and livenessDecision are null`() {
-        val bytes = AttestationBuilder.build(
-            context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
-            ambient = AmbientConditions(),
-        )
-        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
-        assertEquals("pass", obj.getString("liveness_decision"))
-    }
-
     // M-3 — challenge_response reflects what the SDK actually detected
-    // (`firedSteps`), not just what the server prompted
-    // (`session.challenge_sequence`). On completed==true these are equal
-    // by construction. The on-wire test fixes `firedSteps` to a known
-    // order and asserts the comma-join matches.
+    // (`firedSteps`), not just what the server prompted. On completed==true
+    // these are equal by construction; the test pins the on-wire join.
     @Test
     fun `challenge_response is firedSteps wire-joined when challengeResult is complete`() {
         val result = ChallengeResult(
@@ -369,8 +296,8 @@ class AttestationBuilderTest {
         )
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
             livenessDecision = "pass",
             challengeResult = result,
@@ -379,11 +306,17 @@ class AttestationBuilderTest {
         assertEquals("blink,look_left,smile", obj.getString("challenge_response"))
     }
 
-    // M-3 — timed-out run still sends empty string so relay's
-    // checkChallenge rejects the half-done result (unchanged from
-    // pre-fix). Keeping this test wires in the new field surface.
+    // v0.2.0 — on a timed-out run the builder now emits the partial
+    // firedSteps prefix (not ""); the relay's checkChallenge still
+    // rejects since the prefix won't equal the issued sequence, and the
+    // wire error becomes ERR_CHALLENGE_MISMATCH (meaningful) instead of
+    // ERR_SCHEMA_INVALID (opaque). Pre-fix this test pinned "" — the
+    // stub path masked the schema trap; stub removal exposed it. The
+    // relay has a sibling test
+    // (`attestation.test.ts: rejects a partial challenge_response ...`)
+    // that pins the semantic rejection of this exact "blink" payload.
     @Test
-    fun `challenge_response is empty string on timed-out run even with partial firedSteps`() {
+    fun `challenge_response carries partial firedSteps on timed-out run (no empty-string short-circuit)`() {
         val result = ChallengeResult(
             completed = false,
             score = 0.0f,
@@ -394,8 +327,35 @@ class AttestationBuilderTest {
         )
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
+            ambient = AmbientConditions(),
+            livenessDecision = "fail",
+            challengeResult = result,
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertEquals("blink", obj.getString("challenge_response"))
+    }
+
+    // Zero-progress run — user did literally nothing before timeout.
+    // firedSteps is empty, challenge_response is "". The relay's zod
+    // schema is now permissive (v0.2.0 drops .min(1)) so this payload
+    // reaches checkChallenge, which rejects it with
+    // ERR_CHALLENGE_MISMATCH instead of the pre-fix ERR_SCHEMA_INVALID.
+    @Test
+    fun `challenge_response is empty string on zero-progress timed-out run`() {
+        val result = ChallengeResult(
+            completed = false,
+            score = 0.0f,
+            elapsedSeconds = 8.1,
+            stepsCompleted = 0,
+            totalSteps = 3,
+            firedSteps = emptyList()
+        )
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
             livenessDecision = "fail",
             challengeResult = result,
@@ -410,14 +370,32 @@ class AttestationBuilderTest {
     fun `builder emits software_only when deviceAttestation present but status is UNSUPPORTED`() {
         val bytes = AttestationBuilder.build(
             context = context,
-            session = stubSession(),
-            layerScores = AttestationBuilder.stubLayerScores(),
+            session = fakeSession(),
+            layerScores = neutralScores(),
             ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = completedResult(),
             deviceAttestation = "stub-token",
             hwAttestationStatus = CDLSession.HwStatus.UNSUPPORTED,
         )
         val obj = JSONObject(bytes.toString(Charsets.UTF_8))
         assertEquals("software_only", obj.getString("assurance_level"))
         assertEquals("unsupported", obj.getString("hw_attestation_status"))
+    }
+
+    // Guard: the stub_mode field must NOT appear on the wire. Prior
+    // versions stamped a boolean here; relay schema no longer accepts it.
+    @Test
+    fun `builder output omits stub_mode field entirely`() {
+        val bytes = AttestationBuilder.build(
+            context = context,
+            session = fakeSession(),
+            layerScores = neutralScores(),
+            ambient = AmbientConditions(),
+            livenessDecision = "pass",
+            challengeResult = completedResult(),
+        )
+        val obj = JSONObject(bytes.toString(Charsets.UTF_8))
+        assertFalse(obj.has("stub_mode"), "stub_mode must be removed from the wire contract")
     }
 }

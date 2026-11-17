@@ -22,7 +22,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.ramuvenky:openliveness:v0.1.1")
+    implementation("com.github.ramuvenky:openliveness:v0.2.0")
 }
 ```
 
@@ -31,27 +31,25 @@ Minimum SDK: API 26 (Android 8.0). Requires the `CAMERA` permission.
 ## Quick start
 
 ```kotlin
-import dev.openliveness.CDLSession
+import dev.openliveness.OpenLiveness
 import dev.openliveness.parseQRPayload
 
 // 1. You scan the QR with any camera / barcode library. The raw value
 //    is a base64-encoded JSON payload.
 val payload = parseQRPayload(scannedRawValue)
 
-// 2. Hand it to CDLSession. cloudProjectNumber comes from
-//    Google Cloud Console → Project Settings → Project number.
+// 2. Hand it to OpenLiveness.runFrontCameraSession. The SDK owns
+//    MediaPipe, Layer-3/4 detectors, ambient sampling, Play Integrity,
+//    and the WebSocket handshake — no manual wiring. cloudProjectNumber
+//    comes from Google Cloud Console → Project Settings → Project number.
 //    Pass null in dev / on AOSP devices to skip hardware attestation.
-val session = CDLSession(
+val response = OpenLiveness.runFrontCameraSession(
     payload = payload,
     context = context,
+    lifecycleOwner = this,       // Activity or Fragment
+    previewView = previewView,    // attached androidx.camera.view.PreviewView
     cloudProjectNumber = 123456789L,
 )
-
-// 3. start() runs the full handshake: opens the WebSocket, waits for
-//    session_acknowledged, runs liveness (challenge + rPPG + texture +
-//    behavioral), signs with the hardware-backed EC key, POSTs to
-//    /cdl/session/{id}/complete, returns the relay's response.
-val response = session.start()
 
 if (response.accepted && response.attestationToken != null) {
     // Phone's part is done. The browser sees the JWT via its own
@@ -60,7 +58,7 @@ if (response.accepted && response.attestationToken != null) {
 }
 ```
 
-`start()` is a `suspend` function — call it from a coroutine.
+`runFrontCameraSession` is a `suspend` function — call it from a coroutine.
 
 ## What this SDK ships
 
@@ -108,9 +106,12 @@ docker compose up -d
 
 ## Status
 
-v0.1.1 — first public cut (v0.1.0 shipped under a mistaken coordinate
-and is superseded). API surface is small and intentionally stable;
-breaking changes before 1.0 will be flagged in release notes.
+v0.2.0 — batteries-included release. `OpenLiveness.runFrontCameraSession`
+replaces manual Layer-3/4 + stream construction; the MediaPipe
+`face_landmarker.task` now ships inside the AAR (no download step). The
+old `CDLSession(payload, context, cloudProjectNumber = …)` constructor
+and the dev-only `allowStubMode` flag have been removed; see
+`CHANGELOG.md` / release notes for the migration shape.
 
 ## License
 

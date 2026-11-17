@@ -53,10 +53,20 @@ class CDLSessionE2ETest {
             version = "1.0"
         )
 
-        // allowStubMode=true: this E2E runs without a camera / landmarkStream,
-        // so it deliberately exercises the stub path. Production builds that
-        // omit the stream get a hard throw instead.
-        val response = CDLSession(payload, context, allowStubMode = true).start()
+        // No camera on the instrumented host — inject fakes so the
+        // constructor's reference-equality wiring checks pass without a
+        // MediaPipe stream. The stream yields null frames → the
+        // sequencer times out → the attestation reports completed=false
+        // (honest failure), which the stub relay still accepts with a
+        // `stub-attest-` token.
+        val (stream, l3, l4) = fakeWiring()
+        val response = CDLSession(
+            payload = payload,
+            context = context,
+            landmarkStream = stream,
+            layer3 = l3,
+            layer4 = l4,
+        ).start()
 
         assertEquals(true, response.accepted)
         assertNotNull(response.attestationToken)
@@ -91,59 +101,21 @@ class CDLSessionE2ETest {
             version = "1.0"
         )
 
+        val (stream, l3, l4) = fakeWiring()
         val ex = assertThrows(CDLException::class.java) {
-            runBlocking { CDLSession(payload, context).start() }
+            runBlocking {
+                CDLSession(
+                    payload = payload,
+                    context = context,
+                    landmarkStream = stream,
+                    layer3 = l3,
+                    layer4 = l4,
+                ).start()
+            }
         }
         assertTrue(
             "expected close-before-ack message, got: ${ex.message}",
             ex.message!!.contains("acknowledgement")
-        )
-    }
-
-    /// S-NEW-1(b) — production builds must reject the stub-liveness path.
-    /// A CDLSession constructed without a landmarkStream and with the
-    /// default `allowStubMode=false` must throw a CDLException at
-    /// start()-time rather than silently running stub scores. The ack
-    /// must land first so the throw comes from runLiveness (the gate),
-    /// not from the ack timeout — if a regression moved the stub path
-    /// earlier in start() this test would still catch it, but the exact
-    /// message assertion pins down the gate location.
-    @Test
-    fun startThrowsWhenStubModeDisallowedAndNoLandmarkStream() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val server = MockWebServer().also { mockRelay = it }
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(ws: WebSocket, response: okhttp3.Response) {
-                    // Ack immediately so start() reaches runLiveness, where
-                    // the stub-gate throw lives.
-                    ws.send("""{"type":"session_acknowledged"}""")
-                }
-                override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-                    ws.close(code, reason)
-                }
-            })
-        )
-        server.start()
-        val wsUrl = server.url("/cdl/session/x/ws").toString().replaceFirst("http", "ws")
-        val payload = QRPayload(
-            session_id = "x",
-            challenge_id = "c",
-            challenge_sequence = listOf("blink"),
-            relay_ws = wsUrl,
-            relay_http = server.url("/").toString().trimEnd('/'),
-            expires_at = "2099-01-01T00:00:00Z",
-            version = "1.0"
-        )
-
-        // Default allowStubMode=false, no landmarkStream — the production
-        // configuration a downstream integrator ships. Must throw.
-        val ex = assertThrows(CDLException::class.java) {
-            runBlocking { CDLSession(payload, context).start() }
-        }
-        assertTrue(
-            "expected stub-gate message, got: ${ex.message}",
-            ex.message!!.contains("stub liveness path is disabled")
         )
     }
 
@@ -173,8 +145,17 @@ class CDLSessionE2ETest {
             version = "1.0"
         )
 
+        val (stream, l3, l4) = fakeWiring()
         val ex = assertThrows(CDLException::class.java) {
-            runBlocking { CDLSession(payload, context, allowStubMode = true).start() }
+            runBlocking {
+                CDLSession(
+                    payload = payload,
+                    context = context,
+                    landmarkStream = stream,
+                    layer3 = l3,
+                    layer4 = l4,
+                ).start()
+            }
         }
         assertTrue(
             "expected HTTP 404 in message, got: ${ex.message}",
@@ -214,9 +195,19 @@ class CDLSessionE2ETest {
             version = "1.0"
         )
 
+        val (stream, l3, l4) = fakeWiring()
         val started = System.currentTimeMillis()
         val ex = assertThrows(CDLException::class.java) {
-            runBlocking { CDLSession(payload, context, ackTimeoutMs = 500).start() }
+            runBlocking {
+                CDLSession(
+                    payload = payload,
+                    context = context,
+                    ackTimeoutMs = 500,
+                    landmarkStream = stream,
+                    layer3 = l3,
+                    layer4 = l4,
+                ).start()
+            }
         }
         val elapsed = System.currentTimeMillis() - started
         assertTrue("expected timeout message, got: ${ex.message}", ex.message!!.contains("timeout"))

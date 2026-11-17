@@ -76,7 +76,15 @@ class CDLSessionPhase2Test {
             expires_at = "2099-01-01T00:00:00Z",
             version = "1.0",
         )
-        return CDLSession(payload, context, playIntegrity = playIntegrity)
+        val (stream, layer3, layer4) = fakeWiring()
+        return CDLSession(
+            payload = payload,
+            context = context,
+            playIntegrity = playIntegrity,
+            landmarkStream = stream,
+            layer3 = layer3,
+            layer4 = layer4,
+        )
     }
 
     // H1 drift test — happy path. Both calls succeed → (token, OK).
@@ -292,10 +300,14 @@ class CDLSessionPhase2Test {
             expires_at = "2099-01-01T00:00:00Z",
             version = "1.0",
         )
+        val (stream, layer3, layer4) = fakeWiring()
         val opted_out = CDLSession(
             payload = payload,
             context = context,
             // playIntegrity = null, cloudProjectNumber = null → no attestation.
+            landmarkStream = stream,
+            layer3 = layer3,
+            layer4 = layer4,
         )
         val result = opted_out.requestDeviceAttestation("pass")
         assertNull(result.token)
@@ -373,7 +385,15 @@ class CDLSessionPhase2Test {
             expires_at = "2099-01-01T00:00:00Z",
             version = "1.0",
         )
-        CDLSession(payload, activityCtx, playIntegrity = playIntegrity)
+        val (stream, layer3, layer4) = fakeWiring()
+        CDLSession(
+            payload = payload,
+            context = activityCtx,
+            playIntegrity = playIntegrity,
+            landmarkStream = stream,
+            layer3 = layer3,
+            layer4 = layer4,
+        )
 
         verify { activityCtx.applicationContext }
     }

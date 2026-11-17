@@ -280,15 +280,25 @@ def combined_scorer(model_path: Path | str) -> VideoScorer:
     with an aggregated per-frame scorer, and the number that answers
     "what does the layered system actually score on this corpus?".
 
-    Fusion rule: equal-weighted mean of three per-clip terms
-        1. mean of per-frame LBP scores across the clip's `frames`
-        2. mean of per-frame Fourier scores across the clip's `frames`
-        3. pos-rppg `confidence` on the clip's `rgb_signal`
-    Equal weights (1/3 each) because we have no held-out calibration
-    split on MSU-MFSD for v0.1 — the paper table reports this fusion
-    as the honest "no-tuning" baseline. A future calibration pass can
-    swap in AUC-weighted or logistic-regression weights without
-    changing the harness contract.
+    Fusion rule: orchestrator-proportional weighted mean of three
+    per-clip terms (Spec §13; mirrors `core.orchestrator.DEFAULT_WEIGHTS`
+    for the three layers the public corpora can measure):
+        1. LBP        — per-frame TFLite score, mean over clip frames
+        2. Fourier    — per-frame FFT ring-energy, mean over clip frames
+        3. pos-rppg   — per-clip confidence from the RGB signal
+    The orchestrator's full 5-layer default is L2=0.45, L3=0.10,
+    L4Lbp=0.25, L4F=0.10, L5=0.10. MSU-MFSD (like every public PAD
+    corpus) has no L2 challenge data or L5 micro-movement data, so
+    we renormalize the three available layer weights to sum to 1.0:
+        L4 LBP     ≈ 0.5556   (0.25 / 0.45)
+        L4 Fourier ≈ 0.2222   (0.10 / 0.45)
+        L3 pos-rppg≈ 0.2222   (0.10 / 0.45)
+    These proportions reflect the on-device calibration: LBP (AUC 0.78
+    on this corpus) dominates, pos-rppg (AUC 0.484) and Fourier (AUC
+    0.617) each carry a smaller share. The orchestrator abstention
+    rule is NOT applied here — the combined report is the raw-fusion
+    operating point; the server-side decision path lives in
+    `core.orchestrator.orchestrate`.
 
     `model_path` is the LBP TFLite artefact — Fourier and pos-rppg own
     no weights so they ignore it. Defaults via DEFAULT_MODEL_PATHS to
@@ -304,6 +314,19 @@ def combined_scorer(model_path: Path | str) -> VideoScorer:
             back to rPPG-only would hide a dataset-config bug behind
             degraded numbers.
     """
+    # Import locally so the orchestrator module's weight table is the
+    # single source of truth — a future recalibration edits
+    # DEFAULT_WEIGHTS and the benchmark follows automatically.
+    from core.orchestrator import DEFAULT_WEIGHTS
+
+    w_lbp_raw = DEFAULT_WEIGHTS["layer4_lbp"]
+    w_four_raw = DEFAULT_WEIGHTS["layer4_fourier"]
+    w_rppg_raw = DEFAULT_WEIGHTS["layer3"]
+    denom = w_lbp_raw + w_four_raw + w_rppg_raw
+    w_lbp = w_lbp_raw / denom
+    w_four = w_four_raw / denom
+    w_rppg = w_rppg_raw / denom
+
     # Build the three underlying scorers eagerly — any missing-dep /
     # missing-model failure surfaces here, before the harness starts
     # churning through clips. Matches the LBP/Fourier/pos-rppg factory
@@ -328,10 +351,10 @@ def combined_scorer(model_path: Path | str) -> VideoScorer:
         fourier_scores = [fourier(frame) for frame in sample.frames]
         rppg_score = rppg(sample)
         return (
-            float(np.mean(lbp_scores))
-            + float(np.mean(fourier_scores))
-            + rppg_score
-        ) / 3.0
+            w_lbp * float(np.mean(lbp_scores))
+            + w_four * float(np.mean(fourier_scores))
+            + w_rppg * rppg_score
+        )
 
     return score
 

@@ -15,7 +15,7 @@ plugins {
 //      artifactId=<repo>, ignoring the Gradle `group` below). Version
 //      here must match the tag minus the leading `v`.
 group = "dev.openliveness"
-version = "0.1.1"
+version = "0.2.0"
 
 android {
     namespace = "dev.openliveness"
@@ -31,59 +31,6 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
-    }
-    // BuildConfig.STUB_PATH_ENABLED is the compile-time half of the
-    // stub_mode defense. It mirrors the iOS OPENLIVENESS_STUB_ALLOWED
-    // SwiftPM flag: debug variants of the SDK (and any app depending on
-    // this library's debug flavour) can take the stub liveness path;
-    // release variants cannot. CDLSession enforces this at construction
-    // time so a hostile fork that flips `allowStubMode = true` in source
-    // still can't ship a release AAR that silently always passes
-    // liveness. The server-side STUB_MODE_RP_ALLOWLIST is the second
-    // layer of defense for the Android case (iOS doesn't need it because
-    // its gate is physically compiled out — Android's constructor arg
-    // is runtime, so this check + the server policy together close the
-    // asymmetry).
-    buildFeatures {
-        buildConfig = true
-    }
-    buildTypes {
-        getByName("debug") {
-            buildConfigField("boolean", "STUB_PATH_ENABLED", "true")
-        }
-        getByName("release") {
-            buildConfigField("boolean", "STUB_PATH_ENABLED", "false")
-        }
-    }
-
-    // Defense-in-depth: pins the release value of STUB_PATH_ENABLED
-    // specifically. Fails Gradle configuration if a future edit ever
-    // flips STUB_PATH_ENABLED to anything other than literal "false" on
-    // the release build type. The runtime check in CDLSession.checkStubGate
-    // reads the SAME BuildConfig constant, so a reviewer who sees
-    // build.gradle.kts untouched can trust that CDLSession's gate still
-    // has `false` as its right-hand side at release time. This does NOT
-    // protect against unrelated tampering of CDLSession.kt (e.g.
-    // deleting the checkStubGate call site itself) — that's covered by
-    // normal code review of CDLSession.kt.
-    //
-    // Fires on EVERY Gradle invocation (not just assembleRelease) so an
-    // integrator who tries `./gradlew tasks` on a tampered checkout sees
-    // the failure immediately. The cost is one map lookup at config time.
-    afterEvaluate {
-        val releaseField = android.buildTypes.getByName("release").buildConfigFields["STUB_PATH_ENABLED"]
-            ?: throw GradleException(
-                "release build type must declare a STUB_PATH_ENABLED buildConfigField; " +
-                "a release AAR built without it would compile against a missing BuildConfig constant."
-            )
-        if (releaseField.value != "false") {
-            throw GradleException(
-                "release build must set STUB_PATH_ENABLED=\"false\", found \"${releaseField.value}\". " +
-                "Flipping this to true would ship a release AAR whose runtime stub gate (CDLSession.checkStubGate) " +
-                "accepts allowStubMode=true, which silently makes every liveness call pass. If you genuinely " +
-                "need the stub path in a debug flow, use the debug build type — do not relax the release gate."
-            )
-        }
     }
     // Phase 2 drift tests touch AttestationBuilder which calls
     // Settings.Secure.getString(). In JVM unit tests android.* methods

@@ -174,11 +174,9 @@ jobs:
       # still produces a clean Release binary with no testability hooks.
       #
       # `-skip-testing:OpenLivenessIntegrationTests` mirrors the ios.yml
-      # unit-tests split. The integration suite talks to the Python stub-
-      # relay (not started here) and passes `allowStubMode: true`
-      # explicitly, so it exercises neither the Release stub-gate nor any
-      # Release-only code — compiling it just costs CI time with zero
-      # added coverage.
+      # unit-tests split. The integration suite talks to the Python
+      # stub-relay (not started here), so compiling it in this job just
+      # costs CI time with zero added coverage.
       - name: Test OpenLiveness SDK (Release config)
         working-directory: ios-sdk
         run: |

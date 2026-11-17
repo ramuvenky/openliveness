@@ -14,51 +14,14 @@ public final class CDLSession {
 
     private let relay: RelayClient
     private var webSocket: URLSessionWebSocketTask?
-    /// Optional live-camera landmark source. When nil, start() takes the
-    /// Phase-1 stub path only if [allowStubMode] is true; otherwise it
-    /// throws CDLError.stubModeDisallowed at run time. When non-nil,
-    /// start() drives a ChallengeSequencer against the stream and the
-    /// attestation reports the real Layer-2 result.
-    private let landmarkStream: LandmarkStream?
-    /// S-NEW-1(b) — Escape hatch for the Phase-1 stub liveness path.
-    /// Default is `false` on release builds so a production integrator
-    /// who forgets to inject a `landmarkStream` gets a loud throw at
-    /// `start()` rather than silently shipping an SDK that always
-    /// passes liveness. Unit tests and relay CI e2e that still need the
-    /// stub path must set this to `true` explicitly — the explicit
-    /// opt-in is the tripwire. The server-side `stub_mode` wire marker
-    /// (see AttestationBuilder) is the defense-in-depth half of this
-    /// gate: even if a hostile fork sets this flag to `true`, the relay
-    /// can refuse `stub_mode: true` payloads from production session
-    /// IDs.
-    ///
-    /// The `OPENLIVENESS_STUB_ALLOWED` SwiftPM compile flag flips the
-    /// *default* to `true` so test harnesses (and only test harnesses)
-    /// can call `CDLSession(from: payload)` without threading the flag
-    /// through every construction site. Downstream integrators must
-    /// NOT compile with this flag in production — the server-side
-    /// `stub_mode` enforcement is what protects against the case where
-    /// they do.
-    private let allowStubMode: Bool
-
-    // `@usableFromInline internal` (not `private`) because this is referenced
-    // from the default-argument expression of the `public init` below. Swift
-    // inlines default-argument expressions at the caller's module, so the
-    // referenced symbol must be visible there — `private` would make the init
-    // uncompilable (xcode error "cannot be referenced from a default argument
-    // value"). Keeping the storage `internal` instead of `public` means the
-    // compile-flag mechanism itself isn't part of the SDK's stable API; only
-    // the resolved `allowStubMode` arg is.
-    #if OPENLIVENESS_STUB_ALLOWED
-    @usableFromInline internal static let defaultAllowStubMode = true
-    #else
-    @usableFromInline internal static let defaultAllowStubMode = false
-    #endif
+    /// Live-camera landmark source. Required — CDLSession drives a
+    /// ChallengeSequencer against this stream and the attestation
+    /// reports the real Layer-2 result.
+    private let landmarkStream: LandmarkStream
 
     public init(
         from payload: QRPayload,
-        landmarkStream: LandmarkStream? = nil,
-        allowStubMode: Bool = CDLSession.defaultAllowStubMode
+        landmarkStream: LandmarkStream
     ) {
         self.sessionId = payload.session_id
         self.challengeId = payload.challenge_id
@@ -67,7 +30,6 @@ public final class CDLSession {
         self.relayHTTP = payload.relay_http
         self.relay = RelayClient(baseURL: payload.relay_http)
         self.landmarkStream = landmarkStream
-        self.allowStubMode = allowStubMode
     }
 
     /// Run the full handshake. Returns the relay's complete response
@@ -89,18 +51,11 @@ public final class CDLSession {
         // Compute the decision once so the App Attest assertion and the
         // posted attestation sign/stamp the identical string, even if the
         // decision function later becomes non-deterministic.
-        let decision = challengeResult != nil
-            ? LivenessOrchestrator().orchestrate(
-                layerScores: scores,
-                ambientConditions: ambient
-            ).decision
-            : AttestationBuilder.stubLivenessDecision(layerScores: scores)
+        let decision = LivenessOrchestrator().orchestrate(
+            layerScores: scores,
+            ambientConditions: ambient
+        ).decision
         let hw = await requestDeviceAttestation(livenessDecision: decision)
-        // `challengeResult == nil` is the signal that runLiveness fell
-        // back to the stub path (allowStubMode=true + no landmarkStream).
-        // Stamp the wire marker so the relay can enforce production
-        // policy — stub_mode=true outside allow-listed CI session IDs
-        // is a server-side rejection.
         let attestation = try AttestationBuilder.build(
             session: self,
             layerScores: scores,
@@ -108,8 +63,7 @@ public final class CDLSession {
             deviceAttestation: hw.token,
             livenessDecision: decision,
             hwAttestationStatus: hw.status,
-            challengeResult: challengeResult,
-            stubMode: (challengeResult == nil)
+            challengeResult: challengeResult
         )
         return try await relay.submitAttestation(
             sessionId: sessionId,
@@ -117,62 +71,26 @@ public final class CDLSession {
         )
     }
 
-    /// Return real Layer-2 scores + the sequencer's ChallengeResult when
-    /// a landmark stream was supplied; fall back to Phase-1 stub scores
-    /// (and nil result) only when `allowStubMode == true`. Throws
-    /// `CDLError.stubModeDisallowed` otherwise — a release-build integrator
-    /// who forgets to inject a landmarkStream gets a loud failure here
-    /// instead of a silently-passing liveness check. The nil-result signal
-    /// is still what tells `.build(...)` to echo the legacy
-    /// challenge_response and stamp `stub_mode=true`.
-    ///
-    /// M-1: `private` in release builds — the SDK's public surface must
-    /// not expose the liveness pump directly. A `#if DEBUG` shim below
-    /// re-exports it to the test target so the stub-gate drift test can
-    /// hit this path without a WebSocket harness. The equivalent Android
-    /// test lives in `CDLSessionE2ETest` and uses MockWebServer; iOS
-    /// lacks that infra, so a debug-only shim is the pragmatic middle.
+    /// Run the Layer-2 ChallengeSequencer against the injected landmark
+    /// stream and return the resulting scores + ChallengeResult.
     private func runLiveness(ambient: AmbientConditions) async throws
-        -> (LayerScores, ChallengeResult?)
+        -> (LayerScores, ChallengeResult)
     {
-        guard let stream = landmarkStream else {
-            guard allowStubMode else {
-                throw CDLError.stubModeDisallowed
-            }
-            return (AttestationBuilder.stubLayerScores(), nil)
-        }
         let sequencer = try ChallengeSequencer(wire: challengeSequence)
-        let runner = Layer2Runner(sequencer: sequencer, stream: stream) { [weak self] progress, layer in
+        let runner = Layer2Runner(sequencer: sequencer, stream: landmarkStream) { [weak self] progress, layer in
             self?.sendProcessingUpdate(progress: progress, currentLayer: layer)
         }
         let result = try await runner.run()
 
-        // Only layer2 is real in Phase 3; layers 3/4/5 stay at stub
-        // confidence so the weighted sum doesn't collapse to a fail
-        // just because other detectors haven't shipped yet. The hard
-        // rule still triggers via layer2ChallengeCompleted == false
-        // when the user doesn't complete the challenge.
-        var scores = AttestationBuilder.stubLayerScores()
+        // Only layer2 is real in Phase 3; layers 3/4/5 are TODO
+        // placeholders. The hard rule still triggers via
+        // layer2ChallengeCompleted == false when the user doesn't
+        // complete the challenge.
+        var scores = LayerScores()
         scores.layer2ChallengeCompleted = result.completed
         scores.layer2ChallengeScore = result.completed ? result.score : 0.0
         return (scores, result)
     }
-
-    #if DEBUG
-    /// M-1 test-only shim. Not compiled into release builds — the leading
-    /// underscore and `_testOnly_` prefix mark it as off-limits for app
-    /// code even inside DEBUG. iOS lacks a MockWebServer-equivalent so
-    /// the stub-gate drift test invokes `runLiveness` directly; a public
-    /// `internal` would leak the liveness pump to any SPM dependant with
-    /// `@testable import OpenLiveness` and widen the attack surface. Keep
-    /// this shim narrow and @_disfavoredOverload-free; the tests should
-    /// call this exact method name and the audit team greps for it.
-    internal func _testOnly_runLiveness(ambient: AmbientConditions) async throws
-        -> (LayerScores, ChallengeResult?)
-    {
-        try await runLiveness(ambient: ambient)
-    }
-    #endif
 
     /// Encode and send a processing_update frame. Silent-fails if the WS
     /// is already closed — a lost progress frame must not fail the

@@ -89,37 +89,100 @@ final class LivenessOrchestratorTests: XCTestCase {
 
     // MARK: - Ambient reweighting
 
-    func testLowLightShiftsWeightsFromRppgToChallengeAndBehavioral() {
+    // Float32 tolerance for weight assertions: motion branch computes
+    // l3 += (l5 - 0.05), and the subtract-then-add path can drift the
+    // result by one ULP across platforms. The Kotlin mirror uses the
+    // same tolerance for the same reason.
+    private let weightEps: Float = 1e-6
+
+    func testLowLightShiftsWeightFromLBPIntoBehavioral() {
+        // v0.2.0 calibration: L3 is already floored at 0.10 by the
+        // default weights, so low-light no longer cuts L3 further.
+        // Instead it shifts 0.05 off L4 LBP (texture noisier under poor
+        // illumination) into L5 (behavioral micro-movement is ambient-
+        // invariant). L2 stays at its default; L4 Fourier is 0 in v0.2.0.
         let w = LivenessOrchestrator.weights(for: AmbientConditions(
             lowLightDetected: true, motionDetected: false, frontCameraConfirmed: true
         ))
-        XCTAssertEqual(w.layer2, 0.35)
-        XCTAssertEqual(w.layer3, 0.15)
-        XCTAssertEqual(w.layer5, 0.15)
-        // Layer 4 weights unaffected by low light.
-        XCTAssertEqual(w.layer4Lbp, 0.20)
-        XCTAssertEqual(w.layer4Fourier, 0.15)
+        XCTAssertEqual(w.layer2, 0.50, accuracy: weightEps)
+        XCTAssertEqual(w.layer3, 0.10, accuracy: weightEps)
+        XCTAssertEqual(w.layer4Lbp, 0.10, accuracy: weightEps)
+        XCTAssertEqual(w.layer4Fourier, 0.00, accuracy: weightEps)
+        XCTAssertEqual(w.layer5, 0.30, accuracy: weightEps)
     }
 
     func testMotionShiftsWeightFromBehavioralToRppg() {
+        // Motion transfer: (l5 - 0.05) drains into l3. From v0.2.0 default
+        // (l5=0.25), transferred=0.20 → l5=0.05, l3=0.10+0.20=0.30.
         let w = LivenessOrchestrator.weights(for: AmbientConditions(
             lowLightDetected: false, motionDetected: true, frontCameraConfirmed: true
         ))
-        XCTAssertEqual(w.layer5, 0.05)
-        XCTAssertEqual(w.layer3, 0.30)
-        XCTAssertEqual(w.layer2, 0.30) // untouched
+        XCTAssertEqual(w.layer2, 0.50, accuracy: weightEps)
+        XCTAssertEqual(w.layer3, 0.30, accuracy: weightEps)
+        XCTAssertEqual(w.layer4Lbp, 0.15, accuracy: weightEps)
+        XCTAssertEqual(w.layer4Fourier, 0.00, accuracy: weightEps)
+        XCTAssertEqual(w.layer5, 0.05, accuracy: weightEps)
     }
 
     func testBothAmbientFlagsStackLowLightThenMotion() {
-        // Low light sets l5=0.15, l3=0.15, l2=0.35; motion then drains
-        // (0.15 - 0.05) = 0.10 from l5 into l3 (C-2), ending at
-        // l5=0.05, l3=0.25, l2=0.35. Server mirrors this exact order.
+        // Low light sets l4Lbp=0.10, l5=0.30 (l3 stays 0.10, l2 stays 0.50);
+        // motion then drains (0.30 - 0.05) = 0.25 from l5 into l3 (C-2),
+        // ending at l5=0.05, l3=0.35, l2=0.50, l4Lbp=0.10, l4F=0.00.
+        // Sum = 1.00. Kotlin/Python mirror this exact sequential order.
         let w = LivenessOrchestrator.weights(for: AmbientConditions(
             lowLightDetected: true, motionDetected: true, frontCameraConfirmed: true
         ))
-        XCTAssertEqual(w.layer5, 0.05)
-        XCTAssertEqual(w.layer3, 0.25)
-        XCTAssertEqual(w.layer2, 0.35)
+        XCTAssertEqual(w.layer2, 0.50, accuracy: weightEps)
+        XCTAssertEqual(w.layer3, 0.35, accuracy: weightEps)
+        XCTAssertEqual(w.layer4Lbp, 0.10, accuracy: weightEps)
+        XCTAssertEqual(w.layer4Fourier, 0.00, accuracy: weightEps)
+        XCTAssertEqual(w.layer5, 0.05, accuracy: weightEps)
+    }
+
+    // MARK: - Layer 3 abstention renormalization
+
+    func testLayer3AbstentionWithStrongOthersPasses() {
+        // Post-2026-11 calibration: L3 confidence < 1e-6 drops its weight
+        // and renormalizes the remaining four to sum to 1.0. Strong
+        // signals on L2+L4+L5 carry the session rather than being dragged
+        // below 0.60 by a 0-confidence vote on a signal that simply
+        // wasn't measurable.
+        var s = fullPass()
+        s.layer2ChallengeScore = 0.9
+        s.layer3PulseDetected = false
+        s.layer3BpmInRange = false
+        s.layer3RppgConfidence = 0.0
+        s.layer4LbpScore = 0.9
+        s.layer4FourierScore = 0.9
+        s.layer5BehavioralScore = 0.9
+        let r = LivenessOrchestrator().orchestrate(
+            layerScores: s, ambientConditions: AmbientConditions(),
+            hardwareAttestationVerified: true
+        )
+        XCTAssertEqual(r.decision, "pass")
+        XCTAssertEqual(r.assuranceLevel, "IAL2")
+    }
+
+    func testLayer3AbstentionHonestPhotoAttackFails() {
+        // Companion to the live-user test. Same L2=0.9 + L3 abstention,
+        // but honest low Layer-4 + no micro-saccade (L5=0.0) must still
+        // fail. The v0.2.0 reweight (drained Fourier/LBP mass into L5)
+        // was specifically balanced so L2 alone can't carry the sum
+        // above INCONCLUSIVE=0.60 when L5 is flat:
+        //   remaining = 0.50 + 0.15 + 0.00 + 0.25 = 0.90
+        //   weighted  = 0.9*(0.50/0.90) + 0.15*(0.15/0.90) + 0 + 0
+        //             = 0.500 + 0.025 = 0.525 → fail
+        var s = LayerScores()
+        s.layer2ChallengeCompleted = true
+        s.layer2ChallengeScore = 0.9
+        s.layer3RppgConfidence = 0.0
+        s.layer4LbpScore = 0.15
+        s.layer4FourierScore = 0.0
+        s.layer5BehavioralScore = 0.0
+        let r = LivenessOrchestrator().orchestrate(
+            layerScores: s, ambientConditions: AmbientConditions()
+        )
+        XCTAssertEqual(r.decision, "fail")
     }
 
     // C-2: every weight permutation must sum to 1.0. The old `motion`

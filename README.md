@@ -101,7 +101,7 @@ proof that a real human was verified on a real device.
 | `relay/` | Node.js WebSocket relay server | self-host (`docker compose`) |
 | `verify/` | Attestation JWT verification | `npm i @openliveness/verify` |
 | `web-sdk/` | Browser QR display + session polling | `npm i @openliveness/web` |
-| `android-sdk/` | Kotlin SDK for Android phones | JitPack: `com.github.ramuvenky:openliveness:v0.1.1` |
+| `android-sdk/` | Kotlin SDK for Android phones | JitPack: `com.github.ramuvenky:openliveness:v0.2.0` |
 | `ios-sdk/` | Swift SDK for iPhones | Not yet published (blocked on Apple Developer enrollment) |
 | `core/` | Python reference algorithm implementations | In-repo only (research / contributor tooling) |
 | `benchmark/` | ISO/IEC 30107-3 evaluation harness | In-repo only (research / contributor tooling) |
@@ -143,18 +143,19 @@ const result = await verify({
 //   }
 // app/build.gradle.kts:
 //   dependencies {
-//     implementation("com.github.ramuvenky:openliveness:v0.1.1")
+//     implementation("com.github.ramuvenky:openliveness:v0.2.0")
 //   }
 
-import dev.openliveness.CDLSession
+import dev.openliveness.OpenLiveness
 import dev.openliveness.parseQRPayload
 
-val session = CDLSession(
+val response = OpenLiveness.runFrontCameraSession(
     payload = parseQRPayload(scannedQR),
     context = context,
+    lifecycleOwner = this,               // Activity or Fragment
+    previewView = previewView,            // attached androidx.camera.view.PreviewView
     cloudProjectNumber = 123456789L,     // from Google Cloud Console; pass null to skip HW attestation
 )
-val response = session.start()           // suspend fun — call from a coroutine
 // response.accepted + response.attestationToken
 ```
 
@@ -220,7 +221,7 @@ in any legal or technical sense.
 
 ## Status
 
-Active development. **Shipping now**: Android SDK v0.1.1 on JitPack, `@openliveness/web` and `@openliveness/verify` v0.1.1 on npm.
+Active development. **Shipping now**: Android SDK v0.2.0 on JitPack, `@openliveness/web` and `@openliveness/verify` v0.1.1 on npm.
 
 iOS SDK sits in the repo but is not yet published — it's blocked on
 Apple Developer enrollment. Help on finishing that port is the
@@ -233,4 +234,19 @@ Early adoption partnerships are actively sought.
 
 ## License
 
-Apache 2.0
+Apache 2.0 — with one exception.
+
+The Android SDK bundles a pre-trained TFLite classifier
+(`android-sdk/src/main/assets/lbp_classifier.tflite`) for the
+Layer 4 texture check. That file is trained on the MSU-MFSD
+research dataset and inherits its **research-only** terms; see
+[`MODEL_LICENSE.md`](android-sdk/src/main/assets/MODEL_LICENSE.md)
+next to the artifact for the full text.
+
+**Commercial deployers**: the SDK, orchestrator, relay, and
+protocol are Apache-2.0 and ready to ship. To clear the bundled
+`.tflite`'s research-only restriction, retrain it on your own
+consented data using `core/models/train_texture_model_msu.py` as
+the reference pipeline, export with `core/models/export_tflite.py`,
+and drop the resulting artifact into your fork's assets directory.
+Everything else is already commercial-safe.

@@ -68,11 +68,27 @@ interface GestureDetector {
 }
 
 /**
- * BLINK — EAR = distance(159, 145) / distance(33, 133). Fires when EAR
- * drops below 0.2 for 2+ consecutive frames (eye closed) and then rises
- * back above 0.25 (eye reopened). The reopen gate is what makes this
- * resistant to a static closed-eyes photo: a replay never triggers the
- * closed→open transition.
+ * BLINK — EAR = distance(159, 145) / distance(33, 133). Fires on a
+ * close→open transition detected against a per-user calibrated baseline:
+ * the first [CALIBRATION_FRAMES] valid EAR samples form the open-eye
+ * baseline (median, see below), then "closed" is `ear < baseline × CLOSED_RATIO`
+ * and "reopened" is `ear > baseline × OPEN_RATIO`. The reopen gate is
+ * what makes this resistant to a static closed-eyes photo: a replay
+ * never triggers the closed→open transition.
+ *
+ * Why per-user calibration (not static 0.20/0.25): real-world resting
+ * EAR varies with anatomy (heavy-lidded users), camera framing, and
+ * MediaPipe landmark jitter on the user's specific face. A fixed 0.2/
+ * 0.25 pair leaves narrow-eyed users permanently below the OPEN
+ * threshold, so the detector can never register the "open" state the
+ * reopen gate needs — reported from a real device with resting
+ * EAR ≈ 0.23. Calibrating per-session dodges the problem.
+ *
+ * Median (not mean) of calibration samples, same rationale as
+ * SmileDetector's neutralMouthWidth: an eager user who blinks during
+ * warmup could drag a mean baseline down and lower the trigger past
+ * their real open-eye EAR. Median shrugs off a minority of blink
+ * frames inside the 10-frame window.
  *
  * Note on repeated firing: `closedFrames` and `waitingForReopen` both
  * reset after a fire, so a sustained close→open→close→open stream can
@@ -83,13 +99,44 @@ interface GestureDetector {
  */
 class BlinkDetector : GestureDetector {
     companion object {
-        const val CLOSED_THRESHOLD = 0.2f
-        const val OPEN_THRESHOLD = 0.25f
+        /** Fraction of baseline EAR below which the eye is counted "closed".
+         *  0.75 = a 25% drop from the user's resting EAR. Typical blinks
+         *  cut EAR by ~50%+ so this clears for any real blink; the 25%
+         *  gap filters natural squint jitter. */
+        const val CLOSED_RATIO = 0.75f
+        /** Fraction of baseline EAR above which a latched-closed eye fires
+         *  on reopen. 0.95 (not 1.0) because the EAR right after a blink
+         *  can briefly overshoot or settle below baseline by a few percent
+         *  — a 1.0 gate would miss the reopen frame on those users. */
+        const val OPEN_RATIO = 0.95f
         const val MIN_CLOSED_FRAMES = 2
+        const val CALIBRATION_FRAMES = 10
+        // Diagnostic TAG. Verbose by default so a default logcat run
+        // stays quiet; `adb logcat *:S OpenLivenessBlink:V` surfaces the
+        // per-frame EAR when a user reports "I blinked and nothing
+        // happened" — the three failure modes (EAR never drops below
+        // the calibrated closed trigger, drops but never reopens past
+        // the open trigger, or face lost entirely so eyeWidth hits 0)
+        // are each visible in the log stream without a toggle or rebuild.
+        private const val TAG = "OpenLivenessBlink"
     }
 
+    private val neutralSamples = mutableListOf<Float>()
     private var closedFrames = 0
     private var waitingForReopen = false
+
+    /** Per-user open-eye EAR, median of the first [CALIBRATION_FRAMES]
+     *  valid samples. Null until calibration completes; exposed for
+     *  test assertions (same pattern as [SmileDetector.neutralMouthWidth]). */
+    val neutralEar: Float?
+        get() = if (neutralSamples.size >= CALIBRATION_FRAMES) median(neutralSamples) else null
+
+    private fun median(xs: List<Float>): Float {
+        val sorted = xs.sorted()
+        val n = sorted.size
+        return if (n % 2 == 1) sorted[n / 2]
+            else (sorted[n / 2 - 1] + sorted[n / 2]) / 2f
+    }
 
     // Convenience for frame-counted detectors: callers that don't track
     // time can skip the timestamp arg. The sequencer always uses the
@@ -104,31 +151,69 @@ class BlinkDetector : GestureDetector {
             // let a lost-then-reacquired tracking gap fire a false blink on
             // the next open eye, which a sustained-closed-eye presentation
             // attack could exploit by nudging the camera off the face briefly.
+            //
+            // Calibration samples are NOT taken from degenerate frames
+            // (we return before the sample add below), same guard as
+            // SmileDetector — a zero-width sample would drag the baseline
+            // toward 0 and open a trivial false-fire path.
             closedFrames = 0
             waitingForReopen = false
+            android.util.Log.v(TAG, "eyeWidth=0 (tracking loss) — state reset")
             return false
         }
         val ear = distance2D(landmarks[159], landmarks[145]) / eyeWidth
 
-        if (waitingForReopen) {
-            if (ear > OPEN_THRESHOLD) {
-                waitingForReopen = false
-                closedFrames = 0
-                return true
+        if (neutralSamples.size < CALIBRATION_FRAMES) {
+            neutralSamples.add(ear)
+            // Log.d (not Log.v) so logcat's chatty filter doesn't elide
+            // the calibration trace — real devices have shown only the
+            // first sample surviving at Log.v. Calibration lasts
+            // 10 frames (~333 ms) so this is a 10-line burst per blink
+            // step, well under any real throttling pressure at D level.
+            if (neutralSamples.size == CALIBRATION_FRAMES) {
+                val baseline = neutralEar ?: 0f
+                android.util.Log.d(TAG, "calibrated: baseline=%.3f → closedAt<%.3f, openAt>%.3f".format(
+                    baseline, baseline * CLOSED_RATIO, baseline * OPEN_RATIO))
+            } else {
+                android.util.Log.d(TAG, "calibrating: ear=%.3f (sample %d/%d)".format(ear, neutralSamples.size, CALIBRATION_FRAMES))
             }
             return false
         }
 
-        if (ear < CLOSED_THRESHOLD) {
+        val baseline = neutralEar ?: return false
+        if (baseline <= 0f) return false
+        val closedAt = baseline * CLOSED_RATIO
+        val openAt = baseline * OPEN_RATIO
+
+        if (waitingForReopen) {
+            if (ear > openAt) {
+                waitingForReopen = false
+                closedFrames = 0
+                android.util.Log.d(TAG, "FIRED (reopen): ear=%.3f > %.3f".format(ear, openAt))
+                return true
+            }
+            android.util.Log.v(TAG, "waiting for reopen: ear=%.3f (need > %.3f)".format(ear, openAt))
+            return false
+        }
+
+        if (ear < closedAt) {
             closedFrames++
-            if (closedFrames >= MIN_CLOSED_FRAMES) waitingForReopen = true
+            if (closedFrames >= MIN_CLOSED_FRAMES) {
+                waitingForReopen = true
+                android.util.Log.d(TAG, "latched closed: ear=%.3f < %.3f, closedFrames=%d → waiting for reopen".format(ear, closedAt, closedFrames))
+            } else {
+                android.util.Log.v(TAG, "closed frame: ear=%.3f < %.3f, closedFrames=%d (need %d)".format(ear, closedAt, closedFrames, MIN_CLOSED_FRAMES))
+            }
         } else {
+            if (closedFrames > 0) android.util.Log.v(TAG, "open: ear=%.3f >= %.3f, closedFrames reset".format(ear, closedAt))
+            else android.util.Log.v(TAG, "open: ear=%.3f (baseline=%.3f)".format(ear, baseline))
             closedFrames = 0
         }
         return false
     }
 
     override fun reset() {
+        neutralSamples.clear()
         closedFrames = 0
         waitingForReopen = false
     }
@@ -153,6 +238,7 @@ class GazeDetector(val direction: GazeDirection) : GestureDetector {
     companion object {
         const val OFFSET_THRESHOLD = 0.15f
         const val MIN_CONSECUTIVE_FRAMES = 3
+        private const val TAG = "OpenLivenessGaze"
     }
 
     private var consecutiveFrames = 0
@@ -162,7 +248,10 @@ class GazeDetector(val direction: GazeDirection) : GestureDetector {
     override fun update(landmarks: FaceLandmarks, timestamp: Double): Boolean {
         val faceCenterX = (landmarks[234].x + landmarks[454].x) / 2f
         val faceWidth = abs(landmarks[454].x - landmarks[234].x)
-        if (faceWidth <= 0f) return false
+        if (faceWidth <= 0f) {
+            android.util.Log.v(TAG, "faceWidth=0 (tracking loss)")
+            return false
+        }
         val offset = (landmarks[1].x - faceCenterX) / faceWidth
 
         val meets = when (direction) {
@@ -174,9 +263,13 @@ class GazeDetector(val direction: GazeDirection) : GestureDetector {
             consecutiveFrames++
             if (consecutiveFrames >= MIN_CONSECUTIVE_FRAMES) {
                 consecutiveFrames = 0
+                android.util.Log.d(TAG, "FIRED $direction: offset=%+.3f (threshold=%.2f)".format(offset, OFFSET_THRESHOLD))
                 return true
             }
+            android.util.Log.v(TAG, "progress $direction: offset=%+.3f, frames=%d/%d".format(offset, consecutiveFrames, MIN_CONSECUTIVE_FRAMES))
         } else {
+            if (consecutiveFrames > 0) android.util.Log.v(TAG, "reset $direction: offset=%+.3f (needed %s%.2f)".format(
+                offset, if (direction == GazeDirection.LEFT) "<-" else ">+", OFFSET_THRESHOLD))
             consecutiveFrames = 0
         }
         return false
@@ -201,6 +294,7 @@ class SmileDetector : GestureDetector {
         const val WIDTH_MULTIPLIER = 1.2f
         const val MIN_CONSECUTIVE_FRAMES = 5
         const val CALIBRATION_FRAMES = 10
+        private const val TAG = "OpenLivenessSmile"
     }
 
     private val neutralSamples = mutableListOf<Float>()
@@ -225,20 +319,33 @@ class SmileDetector : GestureDetector {
             // Skip degenerate frames (face lost, zero-width mouth). Including
             // them would drag the baseline toward 0, after which the 1.2×
             // trigger would fire on any normal mouth motion — a false pass.
-            if (mouthWidth <= 0f) return false
+            if (mouthWidth <= 0f) {
+                android.util.Log.v(TAG, "skip calibrating sample: mouthWidth=0 (face lost)")
+                return false
+            }
             neutralSamples.add(mouthWidth)
+            if (neutralSamples.size == CALIBRATION_FRAMES) {
+                val neutral = neutralMouthWidth ?: 0f
+                android.util.Log.d(TAG, "calibrated: baseline=%.3f → fireAt>%.3f".format(neutral, neutral * WIDTH_MULTIPLIER))
+            } else {
+                android.util.Log.d(TAG, "calibrating: mouth=%.3f (sample %d/%d)".format(mouthWidth, neutralSamples.size, CALIBRATION_FRAMES))
+            }
             return false
         }
 
         val neutral = neutralMouthWidth ?: return false
         if (neutral <= 0f) return false
-        if (mouthWidth > neutral * WIDTH_MULTIPLIER) {
+        val fireAt = neutral * WIDTH_MULTIPLIER
+        if (mouthWidth > fireAt) {
             consecutiveFrames++
             if (consecutiveFrames >= MIN_CONSECUTIVE_FRAMES) {
                 consecutiveFrames = 0
+                android.util.Log.d(TAG, "FIRED: mouth=%.3f > %.3f (ratio=%.2fx)".format(mouthWidth, fireAt, mouthWidth / neutral))
                 return true
             }
+            android.util.Log.v(TAG, "progress: mouth=%.3f > %.3f, frames=%d/%d".format(mouthWidth, fireAt, consecutiveFrames, MIN_CONSECUTIVE_FRAMES))
         } else {
+            if (consecutiveFrames > 0) android.util.Log.v(TAG, "reset: mouth=%.3f <= %.3f (ratio=%.2fx)".format(mouthWidth, fireAt, mouthWidth / neutral))
             consecutiveFrames = 0
         }
         return false
@@ -282,6 +389,8 @@ class NodDetector : GestureDetector {
          * window; large enough that normal operation never trims.
          */
         const val MAX_SAMPLES = 240
+
+        private const val TAG = "OpenLivenessNod"
     }
 
     private data class Sample(val timestamp: Double, val pitch: Float)
@@ -297,7 +406,10 @@ class NodDetector : GestureDetector {
         // degenerate frames (face lost) so a zero-width frame doesn't
         // divide by zero or inject a bogus sample into the window.
         val faceWidth = abs(landmarks[454].x - landmarks[234].x)
-        if (faceWidth <= 0f) return false
+        if (faceWidth <= 0f) {
+            android.util.Log.v(TAG, "faceWidth=0 (tracking loss)")
+            return false
+        }
         val pitch = (landmarks[152].y - landmarks[10].y) / faceWidth
         buffer.addLast(Sample(timestamp, pitch))
         val cutoff = timestamp - WINDOW_SECONDS
@@ -309,10 +421,13 @@ class NodDetector : GestureDetector {
 
         val minP = buffer.minOfOrNull { it.pitch } ?: return false
         val maxP = buffer.maxOfOrNull { it.pitch } ?: return false
-        if (maxP - minP > PITCH_DELTA_THRESHOLD) {
+        val delta = maxP - minP
+        if (delta > PITCH_DELTA_THRESHOLD) {
             buffer.clear()
+            android.util.Log.d(TAG, "FIRED: delta=%.3f (threshold=%.2f)".format(delta, PITCH_DELTA_THRESHOLD))
             return true
         }
+        android.util.Log.v(TAG, "pitch=%.3f, delta=%.3f (need > %.2f, buffer=%d)".format(pitch, delta, PITCH_DELTA_THRESHOLD, buffer.size))
         return false
     }
 

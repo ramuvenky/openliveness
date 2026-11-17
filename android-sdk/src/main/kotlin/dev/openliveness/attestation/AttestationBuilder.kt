@@ -13,9 +13,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
 /**
- * Builds the signed CDLAttestation map. Falls back to stub layer scores
- * so the end-to-end relay handshake stays exercisable before the real
- * detection layers are wired in.
+ * Builds the signed CDLAttestation map.
  *
  * Platform parity (post-Standard migration): on iOS, `liveness_decision`
  * is baked into the App Attest assertion client data; on Android, it is
@@ -45,16 +43,10 @@ object AttestationBuilder {
          * Attest, future Android remote attestation) MUST pass the same string
          * they fed into the device-signed payload — otherwise the posted
          * attestation and the device assertion disagree on a load-bearing
-         * field.
-         *
-         * H-1: `null` only falls back to the stub rule when `challengeResult`
-         * is also null (the Phase-1 e2e stub path). A caller that passes a
-         * real `challengeResult` without an explicit decision is in a real-
-         * detector flow where the stub rule — which only inspects layer 2 —
-         * would silently emit "pass" on catastrophic layer-3/4/5 scores.
-         * Rather than paper over that mistake we throw at build time.
+         * field. Required: the orchestrator must produce this before the
+         * attestation is built.
          */
-        livenessDecision: String? = null,
+        livenessDecision: String,
         /**
          * How hardware attestation ended. `null` is accepted for callers
          * that pre-date the field; defaults to `UNSUPPORTED` so a missing
@@ -64,42 +56,19 @@ object AttestationBuilder {
          */
         hwAttestationStatus: CDLSession.HwStatus? = null,
         /**
-         * Real Layer-2 outcome. When present, `challenge_response` is
-         * gated on the sequencer's `completed` flag — a timed-out run
-         * sends an empty string that relay checkChallenge rejects, so an
-         * SDK caller that reaches `.build(...)` without actually running
-         * the sequencer to completion cannot submit a passing-looking
-         * payload. This is tamper-defense against SDK-internal bugs or
-         * confused integrators, NOT replay defense (the enclosing payload
-         * is signed; replay is defended at the signature layer). When
-         * null, falls back to echoing the sequence for the Phase 1 stub
-         * path still used by relay e2e tests.
+         * Real Layer-2 outcome. `challenge_response` is gated on the
+         * sequencer's `completed` flag — a timed-out run sends an empty
+         * string that relay checkChallenge rejects, so an SDK caller that
+         * reaches `.build(...)` without actually running the sequencer to
+         * completion cannot submit a passing-looking payload. This is
+         * tamper-defense against SDK-internal bugs or confused integrators,
+         * NOT replay defense (the enclosing payload is signed; replay is
+         * defended at the signature layer).
          */
-        challengeResult: ChallengeResult? = null,
-        /**
-         * On-wire marker that the submitting SDK took the Phase-1 stub
-         * path (no landmark stream wired, layer 3/4/5 scores fabricated
-         * from `stubLayerScores()`). The relay enforces policy — a
-         * production environment is expected to refuse `stub_mode=true`
-         * outside allow-listed CI session IDs. Stamping this on the
-         * client is defense in depth: a hostile fork that rips out the
-         * `allowStubMode` throw in CDLSession can still be caught by the
-         * server-side policy because the wire bytes carry the truth.
-         */
-        stubMode: Boolean = false,
+        challengeResult: ChallengeResult,
     ): ByteArray {
 
-        // H-1: real detector output without an orchestrated decision is a
-        // caller error — the stub rule only inspects layer 2 and would
-        // silently emit "pass" when layers 3/4/5 are catastrophic. Fail
-        // loud rather than ship a lying attestation.
-        if (challengeResult != null && livenessDecision == null) {
-            throw IllegalArgumentException(
-                "AttestationBuilder.build: livenessDecision is required when challengeResult is provided; " +
-                "route the result through LivenessOrchestrator.orchestrate() first."
-            )
-        }
-        val decision = livenessDecision ?: stubLivenessDecision(layerScores)
+        val decision = livenessDecision
         val effectiveHwStatus = hwAttestationStatus
             ?: if (deviceAttestation == null) CDLSession.HwStatus.UNSUPPORTED else CDLSession.HwStatus.OK
         // C-1 + M-1: derive assurance_level from THREE signals — device
@@ -117,21 +86,18 @@ object AttestationBuilder {
                 && effectiveHwStatus == CDLSession.HwStatus.OK
                 && decision == "pass"
             ) "IAL2" else "software_only"
-        // M-3: `challenge_response` reflects what the SDK actually
-        // detected (`firedSteps`), not just what the server prompted
-        // (`session.payload.challenge_sequence`). On a `completed==true`
-        // run these are equal by construction; on a timed-out run
-        // `firedSteps` is the prefix the user actually got through, and
-        // the relay's checkChallenge rejects the mismatched (partial)
-        // string — same tamper-defense goal as before, but now the field
-        // doesn't fabricate the server's prompt. When `challengeResult`
-        // is null the Phase-1 stub path keeps echoing the server
-        // sequence so e2e CI unchanged.
-        val challengeResponse = when {
-            challengeResult == null -> session.payload.challenge_sequence.joinToString(",")
-            challengeResult.completed -> challengeResult.firedSteps.joinToString(",") { it.wire }
-            else -> ""
-        }
+        // `challenge_response` reflects what the SDK actually detected
+        // (`firedSteps`), not what the server prompted — the relay's
+        // checkChallenge compares them. Emitted unconditionally so a
+        // timed-out run still carries the partial prefix (e.g. "blink"
+        // when the user got 1 of 3 steps done). On a `completed==true`
+        // run this equals the issued sequence by construction; on a
+        // zero-progress run it's the empty string, which the relay's
+        // zod schema accepts and checkChallenge rejects with the
+        // intended ERR_CHALLENGE_MISMATCH — the pre-fix "always "" on
+        // incomplete" short-circuited into ERR_SCHEMA_INVALID at the
+        // zod boundary and lost the partial-progress signal.
+        val challengeResponse = challengeResult.firedSteps.joinToString(",") { it.wire }
         val attestation = linkedMapOf<String, Any?>(
             "version" to "1.0",
             "session_id" to session.payload.session_id,
@@ -153,7 +119,6 @@ object AttestationBuilder {
                 "layer5_microsaccade_detected" to layerScores.layer5MicrosaccadeDetected
             ),
             "device_platform" to "android",
-            "stub_mode" to stubMode,
             "device_id_hash" to computeDeviceIdHash(context),
             "ambient_conditions" to mapOf(
                 "low_light_detected" to ambient.lowLightDetected,
@@ -174,38 +139,6 @@ object AttestationBuilder {
         attestation["signature"] = SigningService.sign(canonicalForSigning)
         return CanonicalJson.encode(attestation).toByteArray(Charsets.UTF_8)
     }
-
-    fun stubLayerScores(): LayerScores = LayerScores(
-        layer2ChallengeCompleted = true,
-        layer2ChallengeScore = 0.85f,
-        layer3PulseDetected = true,
-        layer3BpmInRange = true,
-        layer3RppgConfidence = 0.85f,
-        layer4LbpScore = 0.85f,
-        layer4FourierScore = 0.85f,
-        layer5BehavioralScore = 0.85f,
-        layer5MicrosaccadeDetected = true
-    )
-
-    /**
-     * STUB-only decision used by Phase 1 callers that haven't wired a real
-     * LivenessOrchestrator yet. Public so CDLSession can feed the same
-     * string into the signed assertion the device attestation covers,
-     * keeping the posted attestation and the device-signed client data in
-     * agreement when the stub path is active.
-     *
-     * NOT a replacement for LivenessOrchestrator.orchestrate(): this rule
-     * only inspects `layer2ChallengeCompleted` and will emit "pass" even
-     * when layer-3/4/5 scores are catastrophic, because stub scores from
-     * `stubLayerScores()` are hardcoded to 0.85 and inspecting them would
-     * make the stub e2e tests inconsistent. Any caller with real detector
-     * output must route through LivenessOrchestrator — the renamed
-     * `stub` prefix is a tripwire against importing this into real paths.
-     * Changes here are part of the attestation wire contract — review
-     * carefully.
-     */
-    fun stubLivenessDecision(layerScores: LayerScores): String =
-        if (!layerScores.layer2ChallengeCompleted) "fail" else "pass"
 
     private fun iso8601Now(): String =
         DateTimeFormatter.ISO_INSTANT.format(Instant.now().atOffset(ZoneOffset.UTC))

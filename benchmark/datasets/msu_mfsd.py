@@ -279,6 +279,17 @@ def _iter_video(
         cap.release()
 
 
+# Pad the PittPatt bbox by this fraction of its own dimension before
+# cropping. Must match the Android mobile pipeline's
+# `FaceCropExtractor.BBOX_PADDING_FRAC` exactly — a drift silently shifts
+# the LBP histogram out of the model's trained feature space (observed
+# 0.011 on a real face when training used 0 pad and Android used 15%,
+# recovered to ~0.126 after aligning on 15% both sides). See the
+# Silent-Face-Anti-Spoofing "generous crop" convention: the border LBP
+# rows see skin texture rather than empty frame.
+_BBOX_PADDING_FRAC: float = 0.15
+
+
 def _crop_face_grayscale(
     frame_bgr: np.ndarray,
     bbox: tuple[int, int, int, int],
@@ -286,19 +297,29 @@ def _crop_face_grayscale(
 ) -> np.ndarray | None:
     """BGR frame + PittPatt bbox → 80×80 uint8 grayscale face crop.
 
-    Returns None for degenerate boxes (zero-area after clamping),
-    which happens occasionally when PittPatt's rectangle sits partly
-    outside the frame on panned shots. Caller skips those — matches
-    the mobile `FaceCropExtractor` behaviour on an off-frame face.
+    Pads the bbox by `_BBOX_PADDING_FRAC` on each side before cropping,
+    then clamps into the frame. Returns None for degenerate boxes
+    (zero-area after clamping), which happens occasionally when the
+    padded rectangle sits partly outside the frame on panned shots.
+    Caller skips those — matches the mobile `FaceCropExtractor`
+    behaviour on an off-frame face.
     """
     import cv2  # type: ignore
 
     left, top, right, bottom = bbox
     h, w = frame_bgr.shape[:2]
-    left = max(0, left)
-    top = max(0, top)
-    right = min(w, right)
-    bottom = min(h, bottom)
+    # Pad in the original (unclamped) bbox space so a bbox touching the
+    # frame edge still gets a padded crop up to the frame boundary —
+    # matches Android's `coerceAtLeast(0f)` / `coerceAtMost(width-1)`
+    # order in `FaceCropExtractor.extractGrayFaceCrop`.
+    bbox_w = right - left
+    bbox_h = bottom - top
+    pad_x = int(round(bbox_w * _BBOX_PADDING_FRAC))
+    pad_y = int(round(bbox_h * _BBOX_PADDING_FRAC))
+    left = max(0, left - pad_x)
+    top = max(0, top - pad_y)
+    right = min(w, right + pad_x)
+    bottom = min(h, bottom + pad_y)
     if right <= left or bottom <= top:
         return None
     crop = frame_bgr[top:bottom, left:right]

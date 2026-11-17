@@ -104,14 +104,14 @@ raise `NotImplementedError` until a wired-in copy is available.
 |------------------------|------------|------------|------------|-----------|
 | sample unit            | frames     | frames     | clips      | clips     |
 | n_samples              | 1969       | 1969       | 160        | 160       |
-| AUC                    | **0.7797** | 0.6167     | 0.4844     | 0.7123    |
-| optimal threshold      | 0.3084     | 0.1656     | 0.3595     | 0.2644    |
-| APCER @ optimal        | 0.2711     | 0.1993     | 0.3000     | 0.2333    |
-| BPCER @ optimal        | 0.3078     | 0.5738     | 0.6250     | 0.3750    |
+| AUC                    | **0.7797** | 0.6167     | 0.4844     | 0.7481    |
+| optimal threshold      | 0.3084     | 0.1656     | 0.3595     | 0.2458    |
+| APCER @ optimal        | 0.2711     | 0.1993     | 0.3000     | 0.3083    |
+| BPCER @ optimal        | 0.3078     | 0.5738     | 0.6250     | 0.3000    |
 | **HTER @ optimal**     | **0.2895** | 0.3865     | 0.4625     | 0.3042    |
 | APCER @ default (0.5)  | 0.1070     | 0.0000     | 0.1417     | 0.0000    |
-| BPCER @ default (0.5)  | 0.5446     | 1.0000     | 0.9250     | 1.0000    |
-| HTER @ default (0.5)   | 0.3258     | 0.5000     | 0.5333     | 0.5000    |
+| BPCER @ default (0.5)  | 0.5446     | 1.0000     | 0.9250     | 0.8750    |
+| HTER @ default (0.5)   | 0.3258     | 0.5000     | 0.5333     | 0.4375    |
 
 **Bold** = best column.
 
@@ -153,21 +153,29 @@ replays in short clips. Shipping it is still correct — against a
 deepfake video injected via a virtual camera (the attack class
 openliveness primarily targets), rPPG sees no pulse and flags.
 
-**combined (`combined`)** — Equal-weighted mean of LBP's per-clip
-frame mean, Fourier's per-clip frame mean, and pos-rppg's per-clip
-confidence. Beats the two weaker single layers (Fourier and pos-rppg)
-on both AUC and HTER. Does **not** beat LBP alone (0.712 vs 0.780
-AUC) — the below-chance pos-rppg component drags the equal-weighted
-fusion down. This is textbook ensemble-with-weak-learner behaviour:
-naive uniform weights are the honest no-tuning baseline, not the
-operating point you'd ship.
+**combined (`combined`)** — Orchestrator-proportional weighted mean
+of LBP's per-clip frame mean, Fourier's per-clip frame mean, and
+pos-rppg's per-clip confidence. Weights are renormalized from
+`core.orchestrator.DEFAULT_WEIGHTS` over the three layers public
+corpora can measure (no L2 challenge, no L5 micro-movement): LBP
+≈ 0.556, Fourier ≈ 0.222, pos-rppg ≈ 0.222. Beats the two weaker
+single layers (Fourier and pos-rppg) on both AUC and HTER. Still
+does **not** beat LBP alone on AUC (0.748 vs 0.780) — fusing with
+a below-chance pos-rppg component cannot outperform ignoring it on
+a corpus where pos-rppg performs below chance. What the fusion
+*does* buy is a better BPCER operating point than any single scorer
+at the swept-optimal threshold (0.300 vs LBP's 0.308), which
+matters for user experience in production.
 
 **Default-threshold 0.5 is degenerate for the two closed-form
-scorers and the combined scorer.** Fourier/pos-rppg/combined tend
-to produce scores well below 0.5 (BPCER = 100%: every clip,
+scorers and partly for the combined scorer.** Fourier and pos-rppg
+tend to produce scores well below 0.5 (BPCER = 100%: every clip,
 including bona-fide ones, scores below threshold and gets called
-attack). A real deployment would calibrate the threshold on
-held-out data; the swept-optimal column is the number that matters.
+attack). The orchestrator-weighted combined scorer pulls BPCER@0.5
+down to 0.875 since the LBP-dominated fusion crosses 0.5 on some
+bona-fide clips, but the swept-optimal column is still the number
+that matters — a real deployment would calibrate the threshold on
+held-out data.
 
 ---
 
@@ -222,11 +230,16 @@ definitions.
    don't capture. These layers get their own test suites in the
    Android `src/test/kotlin/` tree instead.
 
-5. **The combined scorer's equal weights are arbitrary.** A future
-   pass should swap in AUC-proportional or logistic-regression
-   weights fit on a held-out calibration split. The infrastructure
-   (`combined_scorer` factory) stays the same; only the fusion rule
-   inside changes.
+5. **The combined scorer's weights track the on-device orchestrator,
+   not a held-out calibration fit.** The three layer coefficients
+   (LBP ≈ 0.556, Fourier ≈ 0.222, pos-rppg ≈ 0.222) are the
+   orchestrator's `DEFAULT_WEIGHTS` for the three detectors public
+   corpora can measure, renormalized to sum to 1 (orchestrator L2 +
+   L5 account for the other 0.55 but need interactive capture).
+   This keeps the benchmark honest to what the SDK actually computes
+   in production; a future pass could fit logistic-regression weights
+   on a held-out calibration split for a tighter fit to MSU-MFSD at
+   the cost of divergence from the shipped operating point.
 
 ---
 

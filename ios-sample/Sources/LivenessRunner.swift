@@ -102,16 +102,13 @@ final class LivenessRunner: ObservableObject {
             prompt = Self.promptLabel(for: payload.challenge_sequence.first)
             status = "Running liveness…"
 
-            // Review fix C-2: pass `allowStubMode: true` explicitly rather
-            // than relying on the SDK's debug-only default to resolve
-            // across the SwiftPM module boundary (it doesn't — the compile
-            // flag never propagates from the sample module to the SDK
-            // module). The sample is a documented dev harness protected
-            // by the red banner above AND the server-side STUB_MODE
-            // allow-list, so the explicit opt-in is correct here. Phase 3
-            // Step 5 iOS will swap this for an injected real LandmarkStream
-            // (Vision adapter) at which point the flag can drop to false.
-            let session = CDLSession(from: payload, allowStubMode: true)
+            // iOS lacks a production Vision-based LandmarkStream yet —
+            // Phase 3 Step 5 iOS follow-up ships that adapter. For now the
+            // dev harness uses ScriptedDemoLandmarkStream which emits a
+            // blink-completing frame window so the relay handshake is
+            // exercisable end-to-end.
+            let stream = ScriptedDemoLandmarkStream()
+            let session = CDLSession(from: payload, landmarkStream: stream)
             let response = try await session.start()
             status = "accepted=\(response.accepted)"
             prompt = ""

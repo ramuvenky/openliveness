@@ -68,6 +68,12 @@ class MediaPipeLandmarkStream private constructor(
      *  and forwards it. Null (default) skips the extraction entirely
      *  so sessions that haven't adopted Layer 4 pay no per-frame cost. */
     override val faceCropSink: FaceCropSink?,
+    /** Shared with the result listener for the pipeline-framerate log.
+     *  See `recordAnalyzeTimings`. */
+    private val faceFrames: java.util.concurrent.atomic.AtomicLong,
+    /** Shared with the result listener for the pipeline-framerate log.
+     *  See `recordAnalyzeTimings`. */
+    private val noFaceFrames: java.util.concurrent.atomic.AtomicLong,
 ) : LandmarkStream, ImageAnalysis.Analyzer {
 
     private val gate = ClosableGate()
@@ -91,10 +97,23 @@ class MediaPipeLandmarkStream private constructor(
     @Volatile
     private var lastFaceCropMs: Long = 0L
 
+    // Framerate diagnostic counters. See `maybeLogPipelineSummary`.
+    // Written on the analyzer thread only, so plain Long is fine.
+    private var analyzeEntries: Long = 0
+    private var analyzeMsTotal: Long = 0
+    private var toBitmapMsTotal: Long = 0
+    private var tapsMsTotal: Long = 0
+    private var inferDispatchMsTotal: Long = 0
+    private var lastPipelineLogMs: Long = 0L
+    private var lastAnalyzeEntries: Long = 0
+    private var lastFaceFrames: Long = 0
+    private var lastNoFaceFrames: Long = 0
+
     override suspend fun nextFrame(): LandmarkFrame? =
         channel.receiveCatching().getOrNull()
 
     override fun analyze(image: ImageProxy) {
+        val analyzeStartNs = System.nanoTime()
         try {
             gate.ifOpen {
                 // MediaPipe LIVE_STREAM requires monotonically-increasing
@@ -104,9 +123,12 @@ class MediaPipeLandmarkStream private constructor(
                 // the monotonizer bumps duplicates by +1 ms, below the
                 // detectors' temporal resolution.
                 val tsMs = timestamps.advance(image.imageInfo.timestamp / 1_000_000L)
+                val toBitmapStart = System.nanoTime()
                 val bitmap = image.toBitmap()
+                val toBitmapEnd = System.nanoTime()
                 tapRgb(bitmap, tsMs)
                 tapFaceCrop(bitmap, tsMs)
+                val tapsEnd = System.nanoTime()
                 val mpImage = BitmapImageBuilder(bitmap).build()
                 // Rotation is handed to MediaPipe as metadata so we avoid a
                 // bitmap copy; the horizontal mirror is applied downstream
@@ -115,6 +137,16 @@ class MediaPipeLandmarkStream private constructor(
                     .setRotationDegrees(image.imageInfo.rotationDegrees)
                     .build()
                 landmarker.detectAsync(mpImage, ipo, tsMs)
+                val inferEnd = System.nanoTime()
+                recordAnalyzeTimings(
+                    analyzeStartNs = analyzeStartNs,
+                    toBitmapNs = toBitmapEnd - toBitmapStart,
+                    tapsNs = tapsEnd - toBitmapEnd,
+                    inferDispatchNs = inferEnd - tapsEnd,
+                    analyzeEndNs = inferEnd,
+                    bitmapW = bitmap.width,
+                    bitmapH = bitmap.height,
+                )
             }
         } catch (e: Throwable) {
             // Fail the stream cleanly rather than rethrowing — a thrown
@@ -230,6 +262,59 @@ class MediaPipeLandmarkStream private constructor(
         sink.onFrame(gray, FaceCropExtractor.OUT_SIZE)
     }
 
+    // Framerate triage: emit a one-liner every ~2s with (a) analyze() entry
+    // count since last emit, (b) MediaPipe result callback counts (face +
+    // no-face), and (c) average time breakdown inside analyze(). This lets
+    // a developer tell apart: CameraX under-delivering frames to analyze()
+    // (low analyze count), analyze() itself blocking (high avgAnalyzeMs),
+    // and MediaPipe inference stalling (analyze count >> result count).
+    // Runs on the analyzer thread; `faceFrames`/`noFaceFrames` are atomic
+    // because they're written on MediaPipe's callback thread.
+    private fun recordAnalyzeTimings(
+        analyzeStartNs: Long,
+        toBitmapNs: Long,
+        tapsNs: Long,
+        inferDispatchNs: Long,
+        analyzeEndNs: Long,
+        bitmapW: Int,
+        bitmapH: Int,
+    ) {
+        analyzeEntries++
+        analyzeMsTotal += (analyzeEndNs - analyzeStartNs) / 1_000_000L
+        toBitmapMsTotal += toBitmapNs / 1_000_000L
+        tapsMsTotal += tapsNs / 1_000_000L
+        inferDispatchMsTotal += inferDispatchNs / 1_000_000L
+        val nowMs = System.currentTimeMillis()
+        if (lastPipelineLogMs == 0L) lastPipelineLogMs = nowMs
+        if (nowMs - lastPipelineLogMs < 2000L) return
+        val windowMs = nowMs - lastPipelineLogMs
+        val entriesInWindow = analyzeEntries - lastAnalyzeEntries
+        val faceNow = faceFrames.get()
+        val noFaceNow = noFaceFrames.get()
+        val faceInWindow = faceNow - lastFaceFrames
+        val noFaceInWindow = noFaceNow - lastNoFaceFrames
+        val resultsInWindow = faceInWindow + noFaceInWindow
+        val safeEntries = if (entriesInWindow == 0L) 1L else entriesInWindow
+        val avgAnalyzeMs = analyzeMsTotal / safeEntries
+        val avgBitmapMs = toBitmapMsTotal / safeEntries
+        val avgTapsMs = tapsMsTotal / safeEntries
+        val avgDispatchMs = inferDispatchMsTotal / safeEntries
+        Log.d(
+            TAG,
+            "pipeline ${windowMs}ms: analyze=$entriesInWindow results=$resultsInWindow " +
+                "(face=$faceInWindow noFace=$noFaceInWindow) size=${bitmapW}x${bitmapH} " +
+                "avgMs analyze=$avgAnalyzeMs bitmap=$avgBitmapMs taps=$avgTapsMs dispatch=$avgDispatchMs"
+        )
+        lastPipelineLogMs = nowMs
+        lastAnalyzeEntries = analyzeEntries
+        lastFaceFrames = faceNow
+        lastNoFaceFrames = noFaceNow
+        analyzeMsTotal = 0
+        toBitmapMsTotal = 0
+        tapsMsTotal = 0
+        inferDispatchMsTotal = 0
+    }
+
     override fun close() = closeInternal()
 
     private fun closeInternal() {
@@ -332,6 +417,18 @@ class MediaPipeLandmarkStream private constructor(
             )
             val dropLogged = AtomicBoolean(false)
             val latestLandmarks = AtomicReference<FaceLandmarks?>(null)
+            // Diagnostic counters — every face transition and a periodic
+            // summary are logged at Log.d(TAG) so a developer running
+            // `adb logcat -s $TAG:D` can tell "MediaPipe sees my face" vs
+            // "MediaPipe gets zero landmarks" apart. When Layer-2 detectors
+            // don't fire, this is the first fork in the triage tree: if
+            // face-detected logs stream, the detectors are at fault; if
+            // they don't, the camera / model path is. Permanent not debug-
+            // only — the cost is a few ints per frame plus a line of log
+            // on transition, which is tiny next to MediaPipe inference.
+            val faceFrames = java.util.concurrent.atomic.AtomicLong(0)
+            val noFaceFrames = java.util.concurrent.atomic.AtomicLong(0)
+            val hadFaceLast = AtomicBoolean(false)
             // Capture-before-use: setResultListener fires on MediaPipe's
             // own thread, so we can't close over `this` from the Builder
             // chain — we route the result through the channel instead,
@@ -341,6 +438,23 @@ class MediaPipeLandmarkStream private constructor(
                 .setRunningMode(RunningMode.LIVE_STREAM)
                 .setNumFaces(numFaces)
                 .setResultListener { result, _ ->
+                    val rawFaces = result.faceLandmarks()
+                    val firstSize = rawFaces.firstOrNull()?.size ?: 0
+                    val gotFace = firstSize == FaceLandmarks.EXPECTED_COUNT
+                    if (gotFace) faceFrames.incrementAndGet() else noFaceFrames.incrementAndGet()
+                    // Transition-only logs so a user with a stable face
+                    // doesn't see 30 lines/sec; same when the face is
+                    // consistently absent. Regression bait if someone ever
+                    // changes EXPECTED_COUNT — they'll see "wrong point
+                    // count: got X" in logs the next time they run.
+                    if (gotFace != hadFaceLast.getAndSet(gotFace)) {
+                        if (gotFace) {
+                            Log.d(TAG, "face DETECTED (frames with face=${faceFrames.get()}, without=${noFaceFrames.get()})")
+                        } else {
+                            val detail = if (rawFaces.isEmpty()) "no faces" else "wrong point count: got $firstSize, expected ${FaceLandmarks.EXPECTED_COUNT}"
+                            Log.d(TAG, "face LOST ($detail; frames with face=${faceFrames.get()}, without=${noFaceFrames.get()})")
+                        }
+                    }
                     val frame = toLandmarkFrame(result, mirrorForFrontCamera)
                         ?: return@setResultListener
                     // Publish BEFORE channel send so an analyze() racing
@@ -384,6 +498,8 @@ class MediaPipeLandmarkStream private constructor(
                 latestLandmarks = latestLandmarks,
                 mirrorForFrontCamera = mirrorForFrontCamera,
                 faceCropSink = faceCropSink,
+                faceFrames = faceFrames,
+                noFaceFrames = noFaceFrames,
             )
         }
 

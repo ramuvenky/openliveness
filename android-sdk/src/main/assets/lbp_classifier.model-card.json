@@ -1,9 +1,9 @@
 {
   "model": "openliveness-lbp-texture",
-  "version": "v0.1.0",
+  "version": "v0.2.0",
   "artifact": "lbp_classifier.tflite",
   "artifact_size_bytes": 2816,
-  "sdk_version": "0.1.0",
+  "sdk_version": "0.2.0",
   "training": {
     "corpus": "MSU-MFSD (Wen, Han, Jain 2015 TIFS)",
     "split": "train (15 clients per train_sub_list.txt)",
@@ -12,33 +12,43 @@
     "n_train_samples": 1204,
     "classifier": "LinearSVC + Platt calibration (CalibratedClassifierCV, 5-fold)",
     "feature": "uniform LBP(8,1) histogram over 80x80 grayscale face crop",
+    "preprocessing": "PittPatt bbox padded 15% on each side before cv2.resize((80,80)) + cv2.cvtColor(BGR2GRAY). Matches Android `FaceCropExtractor.BBOX_PADDING_FRAC=0.15f` — alignment is load-bearing; a drift collapses live-user LBP scores (observed 0.011 on a real face before this fix). The v0.1.0 model was trained without this pad and silently mismatched the mobile pipeline.",
     "script": "core/models/train_texture_model_msu.py",
     "export_script": "core/models/export_tflite.py",
-    "pickle_to_tflite_parity": "max abs delta 1e-9 across inner holdout"
+    "pickle_to_tflite_parity": "max abs delta 5.6e-9 across inner holdout"
   },
   "metrics": {
     "msu_mfsd_test": {
-      "auc": 0.780,
-      "hter": 0.289,
+      "auc": 0.767,
+      "hter_at_optimal": 0.293,
+      "hter_at_default_threshold": 0.322,
+      "optimal_threshold": 0.358,
+      "apcer_at_optimal": 0.180,
+      "bpcer_at_optimal": 0.406,
+      "n_live": 549,
+      "n_attack": 1420,
       "protocol": "ISO/IEC 30107-3 — APCER and BPCER computed at equal-error threshold on the held-out MSU-MFSD test split",
-      "source": "benchmark/ harness, Phase 5 run"
+      "source": "benchmark/ harness, Phase 5 run (v0.2.0 retrain with 15% pad)",
+      "note": "AUC regressed marginally from 0.780 (v0.1.0) to 0.767. The pad does not improve MSU in-corpus discrimination — it aligns training preprocessing with the Android inference pipeline, which is what the live-user score collapse required. The optimal threshold of 0.358 well below 0.5 indicates the model is systematically low-scoring; the orchestrator weights (v0.2.0) de-emphasise the LBP branch accordingly and zero out the Fourier branch (pure-math screen-replay detector mis-fires on modern phone captures)."
     },
     "inner_holdout": {
-      "accuracy": 0.854,
-      "macro_f1": 0.795,
+      "accuracy": 0.841,
+      "macro_f1": 0.770,
+      "live_recall": 0.518,
       "n_val_samples": 302,
-      "note": "Inner holdout of the MSU-MFSD TRAIN split only — used during training for calibration. NOT a generalization number; use msu_mfsd_test above for that."
+      "note": "Inner holdout of the MSU-MFSD TRAIN split only — used during training for calibration. NOT a generalization number; use msu_mfsd_test above for that. Live recall 0.518 means roughly half the live samples at the 0.5 threshold get called spoof, which is why layer4_lbp lands around 0.1-0.3 on modern-phone captures — matches the on-device regression that motivated the v0.2.0 orchestrator reweight."
     }
   },
   "limitations": [
-    "Trained on MSU-MFSD only — a single corpus of 35 clients captured on 2015-era devices. Expect degraded performance on modern high-DPI displays, OLED phones, and non-English demographics underrepresented in MSU-MFSD.",
+    "Trained on MSU-MFSD only — a single corpus of 35 clients captured on 2015-era devices (640×480 Nexus 5 front camera, MacBook Air built-in). Expect degraded performance on modern high-DPI displays, OLED phones, and demographics underrepresented in MSU-MFSD.",
+    "Layer 4 LBP is weak on modern phone captures — v0.2.0 reduced its orchestrator weight accordingly and zeroed out the Fourier (screen-replay) branch whose hand-tuned ring-ratio constants also mis-fire on high-resolution modern cameras.",
     "Layer 4 is one of five defense layers. Do not interpret this model's score in isolation — the SDK orchestrator combines it with Layers 2 (challenge), 3 (rPPG), and 5 (behavioral) before emitting liveness_decision.",
-    "HTER 0.289 on MSU-MFSD test is a research-grade number, not a production SLA. Treat the SDK's liveness_decision as a strong signal, not a sole authenticator."
+    "HTER 0.293 on MSU-MFSD test is a research-grade number, not a production SLA. Treat the SDK's liveness_decision as a strong signal, not a sole authenticator."
   ],
   "provenance": {
     "repo": "github.com/ramuvenky/openliveness",
-    "export_commit": "be7df70",
-    "export_commit_subject": "Ship Phase 5: MSU-MFSD benchmark + Android Layer-4 TFLite pipeline"
+    "export_commit": "51a02c9",
+    "export_commit_subject": "Merge pull request #15 from ramuvenky/newsdkversions (retrain with 15% bbox pad)"
   },
   "license": "Apache-2.0",
   "contact": "see SECURITY.md"

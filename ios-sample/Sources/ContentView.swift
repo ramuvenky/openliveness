@@ -17,12 +17,12 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            // Preview sits behind every other layer. In stub mode (no
-            // injected real LandmarkStream) the camera still runs so the
-            // user sees themselves — mirrors the Android sample's choice
-            // not to hide the preview just because the model asset is
-            // missing. The banner above makes the "this isn't real
-            // liveness" state unambiguous either way.
+            // Preview sits behind every other layer. The camera runs so
+            // the user sees themselves even while the dev harness is
+            // driving Layer-2 with a scripted LandmarkStream — mirrors
+            // the Android sample's choice not to hide the preview just
+            // because the model asset is missing. The banner above makes
+            // the "this isn't production" state unambiguous either way.
             CameraPreview(capture: runner.cameraCapture)
                 .ignoresSafeArea()
 

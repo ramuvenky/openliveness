@@ -122,6 +122,7 @@ class CDLSessionLayer3IntegrationTest {
         private val dt: Double,
         private val face: FaceLandmarks,
         override val rgbSink: RGBSampleSink?,
+        override val faceCropSink: dev.openliveness.layers.FaceCropSink?,
         private val rgbChannelAt: (frameIndex: Int) -> RGBSample?,
     ) : LandmarkStream {
         private var i = 0
@@ -146,11 +147,13 @@ class CDLSessionLayer3IntegrationTest {
         val greenAmp = 2.6f
 
         val layer3 = Layer3RPPG()
+        val layer4 = dev.openliveness.layers.Layer4Texture(executor = dev.openliveness.layers.Layer4Texture.DIRECT_EXECUTOR)
         val stream = ScriptedPulseStream(
             nSamples = n,
             dt = (1.0 / fs),
             face = neutralFace(),
             rgbSink = layer3,
+            faceCropSink = layer4,
             rgbChannelAt = { idx ->
                 val t = idx * (1.0 / fs)
                 val g = greenMean + greenAmp * sin(2.0 * PI * freqHz * t).toFloat()
@@ -164,6 +167,7 @@ class CDLSessionLayer3IntegrationTest {
             playIntegrity = playIntegrity,
             landmarkStream = stream,
             layer3 = layer3,
+            layer4 = layer4,
         )
 
         val (scores, challengeResult) = session.runLiveness(AmbientConditions())
@@ -236,11 +240,13 @@ class CDLSessionLayer3IntegrationTest {
         // pulseDetected=true). That fallback would make a Layer-3
         // completely-broken SDK look like a working one on the wire.
         val layer3 = Layer3RPPG()
+        val layer4 = dev.openliveness.layers.Layer4Texture(executor = dev.openliveness.layers.Layer4Texture.DIRECT_EXECUTOR)
         val stream = ScriptedPulseStream(
             nSamples = 50,                     // few frames; irrelevant to Layer 3
             dt = 1.0 / 30.0,
             face = neutralFace(),
             rgbSink = layer3,
+            faceCropSink = layer4,
             rgbChannelAt = { null }            // no samples flow
         )
         val session = CDLSession(
@@ -249,6 +255,7 @@ class CDLSessionLayer3IntegrationTest {
             playIntegrity = playIntegrity,
             landmarkStream = stream,
             layer3 = layer3,
+            layer4 = layer4,
         )
 
         val (scores, _) = session.runLiveness(AmbientConditions())

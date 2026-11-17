@@ -53,15 +53,29 @@ class Layer2RunnerTest {
         return lm(p)
     }
 
+    // BlinkDetector requires a 10-frame open-eye calibration window
+    // before the fire path is live (see BlinkDetector docstring). The
+    // sequencer-level tests here always lead with a BLINK step, so
+    // every scripted stream needs the warmup frames prepended.
+    private fun blinkWarmupFrames(startT: Double): List<LandmarkFrame> {
+        val neutral = lm(neutralFace())
+        return (0 until 10).map { i -> frame(neutral, startT + i * 0.033) }
+    }
+
     // MARK: - Happy path
 
     @Test
     fun `run completes and emits terminal progress`() = runBlocking {
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK))
-        val stream = ScriptedStream(listOf(
-            frame(closedEye(), 0.0),
-            frame(closedEye(), 0.033),
-            frame(lm(neutralFace()), 0.066)
+        // Warmup frames calibrate BlinkDetector (baseline = open EAR),
+        // then the 2-closed-1-open blink sequence fires. Timestamps
+        // continue monotonically from the warmup window.
+        val warmup = blinkWarmupFrames(0.0)
+        val tAfterWarmup = warmup.last().timestampSeconds + 0.033
+        val stream = ScriptedStream(warmup + listOf(
+            frame(closedEye(), tAfterWarmup),
+            frame(closedEye(), tAfterWarmup + 0.033),
+            frame(lm(neutralFace()), tAfterWarmup + 0.066)
         ))
         val calls = mutableListOf<Pair<Float, String>>()
         val runner = Layer2Runner(seq, stream) { p, l -> calls += p to l }
@@ -87,7 +101,9 @@ class Layer2RunnerTest {
         // Script runs out mid-sequence. The runner must still return a
         // terminal ChallengeResult (completed=false, score=0) instead of
         // hanging — otherwise CDLSession.start would never submit the
-        // attestation.
+        // attestation. One frame is intentionally short of blink's 10-
+        // frame calibration window; this test doesn't need warmup
+        // because it's checking the stream-end abort, not the fire path.
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK))
         val stream = ScriptedStream(listOf(frame(closedEye(), 0.0)))
         val calls = mutableListOf<Pair<Float, String>>()
@@ -113,12 +129,14 @@ class Layer2RunnerTest {
     @Test
     fun `stream ending after a step records real steps and elapsed`() = runBlocking {
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK, Challenge.LOOK_LEFT))
-        // Complete the BLINK step, then stream dies before LOOK_LEFT.
-        val stream = ScriptedStream(listOf(
-            frame(closedEye(), 0.0),
-            frame(closedEye(), 0.033),
-            frame(lm(neutralFace()), 0.066),     // BLINK fires here
-            frame(leftGaze(), 0.1)               // stream ends after this frame
+        // Calibrate BLINK, complete it, then stream dies before LOOK_LEFT.
+        val warmup = blinkWarmupFrames(0.0)
+        val tAfterWarmup = warmup.last().timestampSeconds + 0.033
+        val stream = ScriptedStream(warmup + listOf(
+            frame(closedEye(), tAfterWarmup),
+            frame(closedEye(), tAfterWarmup + 0.033),
+            frame(lm(neutralFace()), tAfterWarmup + 0.066),     // BLINK fires here
+            frame(leftGaze(), tAfterWarmup + 0.1)               // stream ends after this frame
         ))
         val calls = mutableListOf<Pair<Float, String>>()
         val runner = Layer2Runner(seq, stream) { p, l -> calls += p to l }
@@ -130,8 +148,10 @@ class Layer2RunnerTest {
         assertEquals(1, result.stepsCompleted,
             "stream-end fallback must report real stepsCompleted, not 0")
         assertEquals(2, result.totalSteps)
-        // elapsedSeconds should be lastTimestamp - firstTimestamp = 0.1.
-        assertEquals(0.1, result.elapsedSeconds, 1e-6,
+        // elapsedSeconds = (last ts) − (first ts). First ts is the first
+        // warmup frame at 0.0; last ts is leftGaze at tAfterWarmup + 0.1.
+        val expectedElapsed = tAfterWarmup + 0.1
+        assertEquals(expectedElapsed, result.elapsedSeconds, 1e-6,
             "stream-end fallback must report real elapsed, not 0")
         // The step-completed emit happened mid-stream, so progress 0.5 was
         // sent to the WS before the stream died. The fallback doesn't emit

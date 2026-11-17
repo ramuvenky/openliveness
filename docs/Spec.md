@@ -1655,44 +1655,76 @@ Runs on device. Combines layer scores into final liveness decision.
 
 ### Default Weights
 
+Calibrated 2026-11 against the MSU-MFSD benchmark AUCs (L4 LBP 0.78,
+L4 Fourier 0.617, L3 POS-rPPG 0.484 on ~12s clips). Layer 2 holds the
+largest share because the active challenge is the hardest signal to
+synthesize via injection; Layer 3 gets the smallest detector weight
+because POS-rPPG is near chance on short public corpora. Sum = 1.00;
+every ambient permutation below also sums to 1.00.
+
 ```
-layer2 (active liveness):  0.30
-layer3 (rPPG):             0.25
-layer4_lbp:                0.20
-layer4_fourier:            0.15
+layer2 (active liveness):  0.45
+layer3 (rPPG):             0.10
+layer4_lbp:                0.25
+layer4_fourier:            0.10
 layer5 (behavioral):       0.10
 ```
 
 ### Environmental Adjustments
 
+`low_light_detected` is evaluated first; `motion_detected` stacks on
+top. All implementations (Kotlin, Swift, Python) follow this exact
+sequential order.
+
 ```
 low_light_detected = true:
-  layer3 weight → 0.15
-  layer2 weight → 0.35
-  layer5 weight → 0.15
+  layer4_lbp weight → 0.20   (texture noisier under poor illumination)
+  layer5 weight     → 0.15   (behavioral micro-movement is ambient-invariant)
+  (layer2, layer3, layer4_fourier unchanged)
 
 motion_detected = true:
-  layer5 weight → 0.05
-  layer3 weight → 0.30
+  transferred = layer5 - 0.05
+  layer5 weight → 0.05       (behavioral contaminated by jitter)
+  layer3 weight += transferred
+    (rPPG's finite integration window still averages the pulse)
 ```
+
+### Layer 3 Abstention
+
+```
+LAYER3_ABSTAIN_EPS = 1e-6
+
+Layer 3 is treated as abstaining when
+  layer_scores['layer3_rppg_confidence'] < LAYER3_ABSTAIN_EPS
+
+When abstaining, the Layer 3 weight is zeroed and the remaining four
+weights are renormalized to sum to 1.0.
+```
+
+This keeps the weighted sum from being dragged down by POS-rPPG's
+expected "insufficient samples" outcome on short (~10s) capture
+windows (MIN_SAMPLES_NORMAL not met, zero-mean/zero-std guards fire,
+or SNR fails to lock). CDLSession publishes `confidence = 0` in
+lockstep with the pulse_detected / bpm_in_range booleans in this
+case, so the confidence-only check loses no information.
 
 ### Decision
 
 ```python
 def orchestrate(layer_scores, ambient_conditions):
 
-    weights = get_weights(ambient_conditions)
-
     # Hard fail — challenge is mandatory
     if not layer_scores['layer2_challenge_completed']:
         return 'fail', 0.0
 
+    weights = effective_weights(layer_scores, ambient_conditions)
+
     weighted_score = (
-        layer_scores['layer2_challenge_score']    * weights['layer2'] +
-        layer_scores['layer3_rppg_confidence']    * weights['layer3'] +
-        layer_scores['layer4_lbp_score']          * weights['layer4_lbp'] +
-        layer_scores['layer4_fourier_score']       * weights['layer4_fourier'] +
-        layer_scores['layer5_behavioral_score']   * weights['layer5']
+        layer_scores['layer2_challenge_score']   * weights['layer2'] +
+        layer_scores['layer3_rppg_confidence']   * weights['layer3'] +
+        layer_scores['layer4_lbp_score']         * weights['layer4_lbp'] +
+        layer_scores['layer4_fourier_score']     * weights['layer4_fourier'] +
+        layer_scores['layer5_behavioral_score']  * weights['layer5']
     )
 
     if weighted_score >= 0.75:

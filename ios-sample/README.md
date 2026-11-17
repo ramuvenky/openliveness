@@ -3,8 +3,9 @@
 Dev harness that exercises the openliveness iOS SDK end-to-end on a real
 device. **Not shippable** — the red "DEV HARNESS" banner is permanent so
 a screenshot of a running build cannot be mistaken for a production
-integration, and the server-side `stub_mode` allow-list is the second
-half of the gate against a hostile fork that strips the banner.
+integration, and the sample injects a scripted blink-firing
+`LandmarkStream` (`ScriptedDemoLandmarkStream`) in place of a real
+Vision-based detector that the iOS SDK does not yet ship.
 
 The equivalent Android dev harness lives in `../android-sample`; this
 README documents the iOS-specific build + CI path. Everything else
@@ -24,12 +25,14 @@ xcodegen generate
 open OpenLivenessSample.xcodeproj
 ```
 
-Simulator builds work out of the box — the Debug configuration enables
-the `OPENLIVENESS_STUB_ALLOWED` compile flag so `CDLSession.start()` can
-run its stub-liveness path without a real `LandmarkStream`. App Attest
-is unavailable on the Simulator (`DCAppAttestService.isSupported` is
-false there), so the relay sees `hw_attestation_status: unsupported`
-rather than `.ok` — which is correct, not a bug.
+Simulator builds work out of the box. The sample passes
+`ScriptedDemoLandmarkStream` to `CDLSession.start()` so the Layer-2
+sequencer can complete deterministically without a real camera-backed
+`LandmarkStream` — the iOS SDK's Vision-based adapter is Phase 3 Step 5
+follow-up work. App Attest is unavailable on the Simulator
+(`DCAppAttestService.isSupported` is false there), so the relay sees
+`hw_attestation_status: unsupported` rather than `.ok` — which is
+correct, not a bug.
 
 To exercise App Attest, you need a signed build on a real device. The
 two paths are:

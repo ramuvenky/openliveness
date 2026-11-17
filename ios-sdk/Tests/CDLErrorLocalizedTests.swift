@@ -26,7 +26,6 @@ final class CDLErrorLocalizedTests: XCTestCase {
             .challengeTimeout,
             .sessionExpired,
             .cameraPermissionDenied,
-            .stubModeDisallowed,
         ]
         for err in cases {
             let desc = (err as Error).localizedDescription
@@ -49,12 +48,4 @@ final class CDLErrorLocalizedTests: XCTestCase {
         )
     }
 
-    func test_stubModeDisallowed_mentionsBothEscapes() {
-        // The error's whole value is pointing a confused integrator at the fix.
-        // If the message loses either "LandmarkStream" or "allowStubMode" the
-        // triage breadcrumb is gone and we're back to grep-the-source.
-        let desc = (CDLError.stubModeDisallowed as Error).localizedDescription
-        XCTAssertTrue(desc.contains("LandmarkStream"), "stubModeDisallowed must name the LandmarkStream escape")
-        XCTAssertTrue(desc.contains("allowStubMode"), "stubModeDisallowed must name the allowStubMode escape")
-    }
 }

@@ -51,8 +51,12 @@ object FaceCropExtractor {
     /** Pad the landmark bbox by this fraction of its own dimension before
      *  cropping. Mirrors the "generous crop" Silent-Face-Anti-Spoofing
      *  uses before `cv2.resize((80,80))` so the LBP's border rows see
-     *  skin texture rather than empty frame. 15% is enough to recover
-     *  the forehead that MediaPipe's mesh clips above landmark 10. */
+     *  skin texture rather than empty frame. Must match the padding
+     *  applied inside `benchmark/datasets/msu_mfsd.py::_crop_face_grayscale`
+     *  during training — a drift between the two silently shifts the
+     *  LBP histogram out of the model's trained feature space and
+     *  collapses live-user scores (observed 0.011 on a real face when
+     *  training used 0 pad and Android used 15). */
     const val BBOX_PADDING_FRAC = 0.15f
 
     /** OpenCV `cvtColor(BGR2GRAY)` coefficients. The training data in

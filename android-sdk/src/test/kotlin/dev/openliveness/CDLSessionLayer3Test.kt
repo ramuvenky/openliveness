@@ -52,11 +52,12 @@ class CDLSessionLayer3Test {
         server.shutdown()
     }
 
-    // Fake stream that immediately ends. Overrides `rgbSink` to echo
-    // back the sink it was constructed with (default null) — the H1
-    // wiring check only reads this property.
+    // Fake stream that immediately ends. Overrides `rgbSink` + `faceCropSink`
+    // to echo back the sinks it was constructed with (default null) — the
+    // H1 wiring check only reads these properties.
     private class FakeStream(
         override val rgbSink: RGBSampleSink? = null,
+        override val faceCropSink: dev.openliveness.layers.FaceCropSink? = null,
     ) : LandmarkStream {
         override suspend fun nextFrame(): LandmarkFrame? = null
     }
@@ -72,24 +73,6 @@ class CDLSessionLayer3Test {
     )
 
     // MARK: - H1 wiring check (static helper, exercised directly)
-
-    @Test
-    fun `checkLayer3Wiring is a no-op when layer3 is null`() {
-        // Pre-Phase-4 harness that doesn't opt into rPPG: the stream
-        // may still have a non-null rgbSink (e.g., set for a diagnostic
-        // sink). We never touch it because there's no layer3 to
-        // reconcile.
-        val stream = FakeStream(rgbSink = Layer3RPPG())
-        assertDoesNotThrow { CDLSession.checkLayer3Wiring(layer3 = null, stream = stream) }
-    }
-
-    @Test
-    fun `checkLayer3Wiring is a no-op when stream is null`() {
-        // Stub-mode session: layer3 is held but no stream. The wiring
-        // check has nothing to reconcile against; the stub path never
-        // produces samples anyway.
-        assertDoesNotThrow { CDLSession.checkLayer3Wiring(layer3 = Layer3RPPG(), stream = null) }
-    }
 
     @Test
     fun `checkLayer3Wiring throws when stream rgbSink is null`() {
@@ -166,13 +149,15 @@ class CDLSessionLayer3Test {
         }
         assertEquals(Layer3RPPG.MIN_SAMPLES_NORMAL, layer3.sampleCount)
 
-        val stream = FakeStream(rgbSink = layer3)
+        val layer4 = dev.openliveness.layers.Layer4Texture(executor = dev.openliveness.layers.Layer4Texture.DIRECT_EXECUTOR)
+        val stream = FakeStream(rgbSink = layer3, faceCropSink = layer4)
         val session = CDLSession(
             payload = payload(),
             context = context,
             playIntegrity = playIntegrity,
             landmarkStream = stream,
             layer3 = layer3,
+            layer4 = layer4,
         )
 
         // runLiveness pulls `nextFrame()` which immediately returns null

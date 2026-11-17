@@ -139,6 +139,50 @@ def _orchestrator_fixtures() -> None:
             "weights_applied": result.weights_applied,
         },
     })
+    # L3 abstention cases — exercise the renormalization path across
+    # all 4 ambient permutations. Live-user shape (L2=0.9, L4≈0.5,
+    # L5=1.0, L3 abstains) that the 2026-11 calibration was designed
+    # to pass. A mirror that drops the renormalization lands these
+    # below 0.60 and the parity test catches it.
+    for low_light in (False, True):
+        for motion in (False, True):
+            scores = LayerScores(
+                layer2_challenge_completed=True,
+                layer2_challenge_score=0.9,
+                layer3_rppg_confidence=0.0,
+                layer4_lbp_score=0.5,
+                layer4_fourier_score=0.5,
+                layer5_behavioral_score=1.0,
+            )
+            ambient = AmbientConditions(
+                low_light_detected=low_light,
+                motion_detected=motion,
+            )
+            result = orchestrate(scores, ambient, hardware_attestation_verified=True)
+            cases.append({
+                "name": f"l3_abstention,ll={low_light},motion={motion}",
+                "inputs": {
+                    "layer_scores": {
+                        "layer2_challenge_completed": True,
+                        "layer2_challenge_score": 0.9,
+                        "layer3_rppg_confidence": 0.0,
+                        "layer4_lbp_score": 0.5,
+                        "layer4_fourier_score": 0.5,
+                        "layer5_behavioral_score": 1.0,
+                    },
+                    "ambient_conditions": {
+                        "low_light_detected": low_light,
+                        "motion_detected": motion,
+                    },
+                    "hardware_attestation_verified": True,
+                },
+                "expected": {
+                    "decision": result.decision,
+                    "assurance_level": result.assurance_level,
+                    "weighted_score": result.weighted_score,
+                    "weights_applied": result.weights_applied,
+                },
+            })
     _write("orchestrator", {"cases": cases})
 
 
@@ -212,21 +256,82 @@ def _layer4_fourier_fixtures() -> None:
 
 # ---- Layer 5 behavioral fixtures ----------------------------------------
 
-def _landmark_sequence(n_frames: int, step: float, iris_step: float, seed: int):
+# Canonical neutral positions for every landmark Layer 5 reads. Picked
+# to approximate a face centered at (0.5, 0.5) with the MediaPipe index
+# layout the production pipeline sees. Keeps the generator honest: the
+# variance check compares motion vectors across these indices, so each
+# one has to be populated with a plausible position for the synthetic
+# test to exercise the rigid-body vs articulated discrimination.
+_CANONICAL_LANDMARKS = {
+    1:   (0.50, 0.45),    # nose tip
+    6:   (0.50, 0.40),    # nose bridge (upper)
+    8:   (0.50, 0.42),
+    9:   (0.50, 0.44),
+    10:  (0.50, 0.30),    # forehead (per NodDetector)
+    13:  (0.50, 0.60),    # upper lip center
+    14:  (0.50, 0.62),    # lower lip center
+    33:  (0.35, 0.50),    # left eye outer corner
+    133: (0.45, 0.50),    # left eye inner corner
+    263: (0.65, 0.50),    # right eye outer corner
+    362: (0.55, 0.50),    # right eye inner corner
+    61:  (0.40, 0.65),    # mouth corner left
+    291: (0.60, 0.65),    # mouth corner right
+    152: (0.50, 0.80),    # chin
+    234: (0.25, 0.50),    # face anchor left
+    454: (0.75, 0.50),    # face anchor right
+    468: (0.40, 0.50),    # left iris center
+    469: (0.41, 0.50),
+    470: (0.40, 0.51),
+    471: (0.39, 0.50),
+    472: (0.40, 0.49),
+    473: (0.60, 0.50),    # right iris center
+}
+
+
+def _landmark_sequence(
+    n_frames: int,
+    step: float,
+    iris_step: float,
+    seed: int,
+    articulation: float = 0.0,
+):
+    """Build a synthetic 478-point landmark sequence for L5 fixtures.
+
+    - `step` is the per-frame x oscillation amplitude (sign-alternating)
+      applied to EVERY sampled landmark — a rigid head translation
+      component that gives the nose-bridge its displacement signal.
+    - `iris_step` is the *head-relative* iris saccade component layered
+      on top of head motion; iris landmarks get an extra `iris_step * i`
+      x-displacement so head-relative velocity = iris_step per frame.
+    - `articulation` is a per-frame per-landmark random jitter amplitude
+      applied to non-nose-bridge landmarks only (keeping nose-bridge
+      deterministic so the displacement branch is predictable). Mild
+      values (≈0.003) keep variance below LIVE_VARIANCE_UPPER=3e-5
+      (live-face signature: rigid skull constrains per-landmark deltas
+      close to their mean); larger values (≈0.01) blow variance well
+      past 3e-5 (MediaPipe tracker thrashing on a waved 2D photo).
+    """
     rng = np.random.default_rng(seed)
+    nose_bridge = {6, 8, 9, 10}
     frames = []
     for i in range(n_frames):
         dx = step * ((i % 2) * 2 - 1)
-        iris_x = 0.3 + iris_step * i
         frame = [[0.0, 0.0]] * 478
-        frame[6] = [0.5 + dx, 0.4]
-        frame[8] = [0.5 + dx, 0.42]
-        frame[9] = [0.5 + dx, 0.44]
-        frame[10] = [0.5 + dx, 0.46]
+        for lid, (cx, cy) in _CANONICAL_LANDMARKS.items():
+            if lid in nose_bridge:
+                frame[lid] = [cx + dx, cy]
+                continue
+            jx = float(rng.standard_normal()) * articulation if articulation > 0 else 0.0
+            jy = float(rng.standard_normal()) * articulation if articulation > 0 else 0.0
+            frame[lid] = [cx + dx + jx, cy + jy]
+        # Iris saccade component layered on top of the canonical fill so
+        # the saccade signal isn't absorbed by the articulation jitter.
         for lid in range(468, 473):
-            frame[lid] = [iris_x, 0.5]
+            base_x, base_y = _CANONICAL_LANDMARKS[lid]
+            jx = float(rng.standard_normal()) * articulation if articulation > 0 else 0.0
+            jy = float(rng.standard_normal()) * articulation if articulation > 0 else 0.0
+            frame[lid] = [base_x + dx + iris_step * i + jx, base_y + jy]
         frames.append(frame)
-    _ = rng  # reserved for future noise injection
     return frames
 
 
@@ -296,13 +401,33 @@ def _layer4_lbp_fixtures() -> None:
 
 def _layer5_fixtures() -> None:
     cases = []
+    # `articulation` injects per-landmark jitter. The Nov 2026 inverted
+    # variance gate (post N=14 on-device calibration) routes displacement
+    # ABOVE VARIANCE_GATE_DISPLACEMENT_FLOOR (0.002) by variance:
+    #   - variance < LIVE_VARIANCE_UPPER (3e-5) → NATURAL (live face)
+    #   - variance > LIVE_VARIANCE_UPPER       → SUSPICIOUS (MediaPipe
+    #     thrashing on a waved 2D photo). Articulation 0.003 produces
+    #     variance ≈ 1.8e-5 (live-plausible); 0.01 produces variance
+    #     ≈ 2e-4 (photo-thrash range: on-device 5.57e-5 → 2.81e-4).
+    # Scenarios:
+    #   - still_face: branch 2 (NATURAL, no displacement)
+    #   - waved_photo_above_gate_floor: branch 5 (SUSPICIOUS, high variance)
+    #   - natural_jitter: branch 6 (NATURAL, live articulated motion)
+    #   - natural_with_saccade: saccade detection path with articulation
     scenarios = [
-        ("natural_jitter_no_saccade", {"step": 0.005, "iris_step": 0.0001, "frames": 60}),
-        ("still_face_no_saccade",      {"step": 0.0,   "iris_step": 0.0,     "frames": 60}),
-        ("natural_with_saccade",       {"step": 0.005, "iris_step": 0.03,    "frames": 10}),
+        ("natural_jitter_no_saccade",     {"step": 0.005, "iris_step": 0.0001, "frames": 60, "articulation": 0.003}),
+        ("still_face_no_saccade",         {"step": 0.0,   "iris_step": 0.0,    "frames": 60, "articulation": 0.0}),
+        ("waved_photo_above_gate_floor",  {"step": 0.0025,"iris_step": 0.0,    "frames": 60, "articulation": 0.01}),
+        ("natural_with_saccade",          {"step": 0.005, "iris_step": 0.03,   "frames": 10, "articulation": 0.003}),
     ]
     for name, cfg in scenarios:
-        frames = _landmark_sequence(cfg["frames"], cfg["step"], cfg["iris_step"], seed=1)
+        frames = _landmark_sequence(
+            cfg["frames"],
+            cfg["step"],
+            cfg["iris_step"],
+            seed=1,
+            articulation=cfg["articulation"],
+        )
         score = micro_movement_score(frames)
         saccade = detect_microsaccades(frames)
         cases.append({

@@ -19,9 +19,6 @@ services:
       # placeholder in production, so this must come from .env or shell
       # env. Compose fails fast with a readable error if it's missing.
       - INTEGRITY_NONCE_SECRET=${INTEGRITY_NONCE_SECRET:?INTEGRITY_NONCE_SECRET must be set — copy .env.example to .env, then openssl rand -hex 32}
-      # Allowlist of relying_party values permitted to submit stub_mode:true
-      # attestations. Empty in production. Operator sets via .env for CI RPs.
-      - STUB_MODE_RP_ALLOWLIST=${STUB_MODE_RP_ALLOWLIST:-}
     volumes:
       - ./keys:/keys:ro
     depends_on:

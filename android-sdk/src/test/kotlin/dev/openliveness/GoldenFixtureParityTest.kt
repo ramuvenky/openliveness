@@ -102,10 +102,12 @@ class GoldenFixtureParityTest {
             assertEquals(expected.getString("assurance_level"), result.assuranceLevel, name)
 
             // Weighted score + weights are not exposed on LivenessResult;
-            // pull them from the pure `weightsFor` helper + the same
-            // multiply-add shape the production path uses. Server re-runs
-            // this exact arithmetic, so a drift here matches a drift there.
-            val weights = LivenessOrchestrator.weightsFor(ambient)
+            // pull them from the pure `effectiveWeights` helper + the same
+            // multiply-add shape the production path uses. effectiveWeights
+            // applies both the ambient reweighting AND the abstention
+            // renormalization so the fixture's stored `weights_applied`
+            // (also post-renormalization) is comparable byte-for-byte.
+            val weights = LivenessOrchestrator.effectiveWeights(scores, ambient)
             val expWeights = expected.getJSONObject("weights_applied")
             assertEquals(expWeights.getDouble("layer2"), weights.layer2.toDouble(), EPS_TIGHT, "$name/w.layer2")
             assertEquals(expWeights.getDouble("layer3"), weights.layer3.toDouble(), EPS_TIGHT, "$name/w.layer3")

@@ -43,19 +43,18 @@ final class CDLSessionIntegrationTests: XCTestCase {
         let payload = QRPayload(
             session_id: sessionId,
             challenge_id: "ch-1",
-            challenge_sequence: ["blink", "turn_left"],
+            challenge_sequence: ["blink"],
             relay_ws: "\(Self.relayWS)/cdl/session/\(sessionId)/ws",
             relay_http: Self.relayHTTP,
             expires_at: "2099-01-01T00:00:00Z",
             version: "1.0"
         )
 
-        // allowStubMode=true: no landmarkStream wired, so start() takes the
-        // Phase-1 stub path. Production configuration (allowStubMode=false,
-        // no stream) is already covered by the Debug/Release default test
-        // in OpenLivenessTests — repeating it here against the real relay
-        // would just block on the stub-gate throw before any HTTP call.
-        let response = try await CDLSession(from: payload, allowStubMode: true).start()
+        // Scripted LandmarkStream drives the ChallengeSequencer to
+        // completion deterministically — the integration suite exercises
+        // the relay wire contract, not the real detector pipeline.
+        let stream = ScriptedBlinkStream()
+        let response = try await CDLSession(from: payload, landmarkStream: stream).start()
 
         XCTAssertTrue(response.accepted)
         XCTAssertNotNil(response.attestationToken)
@@ -92,6 +91,43 @@ final class CDLSessionIntegrationTests: XCTestCase {
             throw XCTSkip(
                 "stub-relay not reachable at \(Self.relayHTTP) — start it before `swift test` or run via CI's integration-tests job"
             )
+        }
+    }
+
+    /// Scripts the minimal 3-frame window the BlinkDetector needs to
+    /// fire: two closed-eye frames followed by one open-eye frame. Keeps
+    /// the integration suite deterministic without a real camera.
+    private final class ScriptedBlinkStream: LandmarkStream {
+        private var frames: [(FaceLandmarks, TimeInterval)]
+        init() {
+            self.frames = [
+                (Self.closedEye(), 0.0),
+                (Self.closedEye(), 0.033),
+                (Self.openEye(),   0.066),
+            ]
+        }
+        func nextFrame() async throws -> (FaceLandmarks, TimeInterval)? {
+            frames.isEmpty ? nil : frames.removeFirst()
+        }
+
+        private static func neutralFace() -> [FaceLandmark] {
+            var pts = Array(repeating: FaceLandmark(x: 0, y: 0), count: FaceLandmarks.expectedCount)
+            pts[1]   = FaceLandmark(x: 0.50, y: 0.50)
+            pts[33]  = FaceLandmark(x: 0.40, y: 0.50)
+            pts[133] = FaceLandmark(x: 0.50, y: 0.50)
+            pts[145] = FaceLandmark(x: 0.45, y: 0.50)
+            pts[159] = FaceLandmark(x: 0.45, y: 0.45)
+            pts[234] = FaceLandmark(x: 0.30, y: 0.50)
+            pts[454] = FaceLandmark(x: 0.70, y: 0.50)
+            return pts
+        }
+        private static func closedEye() -> FaceLandmarks {
+            var p = neutralFace()
+            p[159] = FaceLandmark(x: 0.45, y: 0.49)
+            return try! FaceLandmarks(points: p)
+        }
+        private static func openEye() -> FaceLandmarks {
+            try! FaceLandmarks(points: neutralFace())
         }
     }
 

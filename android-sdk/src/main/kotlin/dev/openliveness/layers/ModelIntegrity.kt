@@ -5,8 +5,7 @@ import java.security.MessageDigest
 /**
  * SHA-256 verification for the FaceLandmarker `.task` asset. A caller
  * who pins the model's expected hash gets a loud, early failure if a
- * build pipeline (or hostile fork) swaps the bytes — matching the
- * stub_mode defence pattern elsewhere in the SDK.
+ * build pipeline (or hostile fork) swaps the bytes.
  *
  * The comparison is constant-time so a mismatch doesn't leak byte-wise
  * timing. SHA-256 collisions are a non-issue for this scope (benign

@@ -3,12 +3,16 @@ package dev.openliveness
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.openliveness.attestation.AttestationBuilder
+import dev.openliveness.layers.Challenge
+import dev.openliveness.layers.ChallengeResult
 import dev.openliveness.layers.FaceCropExtractor
 import dev.openliveness.layers.FaceCropSink
 import dev.openliveness.layers.FaceLandmark
 import dev.openliveness.layers.FaceLandmarks
 import dev.openliveness.layers.LandmarkStream
+import dev.openliveness.layers.Layer3RPPG
 import dev.openliveness.layers.Layer4Texture
+import dev.openliveness.layers.RGBSampleSink
 import dev.openliveness.layers.TextureClassifier
 import kotlin.math.abs
 import kotlin.math.sin
@@ -31,11 +35,10 @@ import org.junit.runner.RunWith
  *     → TFLite inference against the shipped lbp_classifier.tflite asset
  *     → AttestationBuilder.build serialized payload
  *
- * The important load-bearing claim: the attestation payload now carries
- * the dynamic Layer-4 output, replacing the historical 0.85 stub that
- * [AttestationBuilder.stubLayerScores] still provides as a fallback.
- * Prior to Phase 5 Step 3 the on-wire `layer4_lbp_score` was exactly
- * 0.85 regardless of what the camera saw.
+ * The important load-bearing claim: the attestation payload carries
+ * dynamic Layer-4 output. Prior to Phase 5 Step 3 the on-wire
+ * `layer4_lbp_score` was exactly the Layer4Texture pre-inference baseline
+ * of 0.85 regardless of what the camera saw.
  *
  * Why instrumented and not JVM: TFLite's `Interpreter` ships ops as a
  * native .so inside the AAR (see TextureClassifierInstrumentedTest).
@@ -73,9 +76,9 @@ class Layer4AttestationPipelineTest {
         )
 
         TextureClassifier.fromAssets(context).use { classifier ->
-            val layer4 = Layer4Texture(classifier)
+            val layer4 = Layer4Texture(classifier, executor = Layer4Texture.DIRECT_EXECUTOR)
             assertEquals(
-                "pre-frame baseline must be the 0.85 stub (contract with stubLayerScores)",
+                "pre-frame baseline is Layer4Texture's neutral 0.85",
                 0.85f, layer4.lbpScore, 1e-6f,
             )
 
@@ -90,11 +93,11 @@ class Layer4AttestationPipelineTest {
             assertTrue("lbp score must be in [0, 1], got $realLbp", realLbp in 0f..1f)
             assertTrue("fourier score must be in [0, 1], got $realFourier", realFourier in 0f..1f)
             // A real sigmoid on a non-degenerate 59-bin histogram almost
-            // never lands on exactly 0.85 — a float equal to the stub
-            // after inference means the sink was never actually invoked
-            // (dead-code wiring regression).
+            // never lands on exactly 0.85 — a float equal to the pre-
+            // inference baseline means the sink was never actually
+            // invoked (dead-code wiring regression).
             assertNotEquals(
-                "lbp score should have moved off the 0.85 stub after a real on-device inference",
+                "lbp score should have moved off the 0.85 baseline after a real on-device inference",
                 0.85f, realLbp,
             )
 
@@ -103,21 +106,44 @@ class Layer4AttestationPipelineTest {
             // but without a WebSocket round-trip — the Layer-4 hookup is
             // what we're testing, and the WS path is covered by
             // CDLSessionE2ETest.
-            val scores = AttestationBuilder.stubLayerScores().copy(
+            val scores = LayerScores(
+                layer2ChallengeCompleted = true,
+                layer2ChallengeScore = 0.85f,
+                layer3PulseDetected = true,
+                layer3BpmInRange = true,
+                layer3RppgConfidence = 0.85f,
                 layer4LbpScore = realLbp,
                 layer4FourierScore = realFourier,
+                layer5BehavioralScore = 0.85f,
+                layer5MicrosaccadeDetected = true,
             )
+            val l3 = Layer3RPPG()
+            val faceStream = object : LandmarkStream {
+                override suspend fun nextFrame() = null
+                override val rgbSink: RGBSampleSink = l3
+                override val faceCropSink: FaceCropSink = layer4
+            }
             val session = CDLSession(
                 payload = minimalPayload(),
                 context = context,
-                allowStubMode = true,
+                landmarkStream = faceStream,
+                layer3 = l3,
+                layer4 = layer4,
             )
             val wireBytes = AttestationBuilder.build(
                 context = context,
                 session = session,
                 layerScores = scores,
                 ambient = AmbientConditions(),
-                stubMode = false,
+                livenessDecision = "pass",
+                challengeResult = ChallengeResult(
+                    completed = true,
+                    score = 1.0f,
+                    elapsedSeconds = 0.1,
+                    stepsCompleted = 1,
+                    totalSteps = 1,
+                    firedSteps = listOf(Challenge.BLINK),
+                ),
             )
             val wireJson = JSONObject(String(wireBytes, Charsets.UTF_8))
             val layerScoresJson = wireJson.getJSONObject("layer_scores")
@@ -136,7 +162,7 @@ class Layer4AttestationPipelineTest {
                 abs(wireFourier - realFourier.toDouble()) <= 1e-6,
             )
             assertNotEquals(
-                "wire layer4_lbp_score must have moved off the 0.85 stub",
+                "wire layer4_lbp_score must have moved off the 0.85 baseline",
                 0.85, wireLbp, 1e-9,
             )
         }
@@ -146,9 +172,11 @@ class Layer4AttestationPipelineTest {
     fun cdlSessionAcceptsLayer4WhenFaceCropSinkMatches() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         TextureClassifier.fromAssets(context).use { classifier ->
-            val layer4 = Layer4Texture(classifier)
+            val layer4 = Layer4Texture(classifier, executor = Layer4Texture.DIRECT_EXECUTOR)
+            val layer3 = Layer3RPPG()
             val fakeStream = object : LandmarkStream {
                 override suspend fun nextFrame() = null
+                override val rgbSink: RGBSampleSink = layer3
                 override val faceCropSink: FaceCropSink = layer4
             }
             assertSame(
@@ -164,8 +192,8 @@ class Layer4AttestationPipelineTest {
                 payload = minimalPayload(),
                 context = context,
                 landmarkStream = fakeStream,
+                layer3 = layer3,
                 layer4 = layer4,
-                allowStubMode = true,
             )
         }
     }
@@ -174,10 +202,12 @@ class Layer4AttestationPipelineTest {
     fun cdlSessionRejectsLayer4WhenFaceCropSinkDiffers() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         TextureClassifier.fromAssets(context).use { classifier ->
-            val wired = Layer4Texture(classifier)
-            val mismatched = Layer4Texture(classifier)
+            val wired = Layer4Texture(classifier, executor = Layer4Texture.DIRECT_EXECUTOR)
+            val mismatched = Layer4Texture(classifier, executor = Layer4Texture.DIRECT_EXECUTOR)
+            val layer3 = Layer3RPPG()
             val fakeStream = object : LandmarkStream {
                 override suspend fun nextFrame() = null
+                override val rgbSink: RGBSampleSink = layer3
                 override val faceCropSink: FaceCropSink = wired
             }
             var thrown: IllegalArgumentException? = null
@@ -186,8 +216,8 @@ class Layer4AttestationPipelineTest {
                     payload = minimalPayload(),
                     context = context,
                     landmarkStream = fakeStream,
+                    layer3 = layer3,
                     layer4 = mismatched,
-                    allowStubMode = true,
                 )
             } catch (e: IllegalArgumentException) {
                 thrown = e

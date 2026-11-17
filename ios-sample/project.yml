@@ -76,7 +76,7 @@ targets:
           present. Video never leaves this device — only a signed
           cryptographic proof is sent to the relay.
         # Review fix H-1: without an ATS exception the sample cannot
-        # reach the dev stub-relay (http://127.0.0.1:8787). Using
+        # reach the dev relay (http://127.0.0.1:8787). Using
         # `NSAllowsLocalNetworking` instead of `NSAllowsArbitraryLoads`
         # keeps HTTPS enforcement for public-internet traffic — only
         # localhost / link-local / mDNS requests are allowed in cleartext.
@@ -112,21 +112,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
       configs:
         Debug:
-          # Review fix C-2: this flag used to live here under the
-          # misunderstanding that it would flip the SDK's
-          # `defaultAllowStubMode`. It doesn't — SwiftPM compiles each
-          # module with its own `swiftSettings`, so a flag defined on
-          # the sample module never reaches the SDK module. The actual
-          # fix is in ios-sdk/Package.swift (`.define(..., .when(.debug))`),
-          # and the sample now passes `allowStubMode: true` explicitly
-          # in LivenessRunner. Leaving this empty rather than deleting
-          # the whole block so the Debug/Release split is still obvious.
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
         Release:
-          # Release builds (what TestFlight ships) deliberately empty —
-          # the sample's `allowStubMode: true` is explicit; the server-
-          # side STUB_MODE_RP_ALLOWLIST is the second half of the gate
-          # against a hostile fork.
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
     dependencies:
       - package: OpenLiveness

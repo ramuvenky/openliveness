@@ -51,6 +51,23 @@ class ChallengeSequencerTest {
         return lm(p)
     }
 
+    // BlinkDetector requires a 10-frame open-eye calibration window
+    // before the fire path goes live (see Layer2ActiveLiveness.kt
+    // BlinkDetector docstring). Sequencer-level tests that need the
+    // blink step to actually complete must push neutral frames through
+    // the sequencer first; this helper keeps the warmup off the
+    // individual tests. The timestamps advance by 1/30s per frame so
+    // the whole warmup fits inside an ~0.3s window — well under the 8s
+    // step budget. Callers pass startT and get back the next timestamp.
+    private fun warmupBlink(seq: ChallengeSequencer, startT: Double): Double {
+        var t = startT
+        repeat(10) {
+            seq.update(lm(neutralFace()), t)
+            t += 0.033
+        }
+        return t
+    }
+
     // MARK: - Construction
 
     @Test
@@ -103,6 +120,7 @@ class ChallengeSequencerTest {
         val events = mutableListOf<ChallengeEvent>()
         var t = 0.0
 
+        t = warmupBlink(seq, t)
         seq.update(closedEyeFrame(), t)?.let { events += it }; t += 0.033
         seq.update(closedEyeFrame(), t)?.let { events += it }; t += 0.033
         seq.update(lm(neutralFace()), t)?.let { events += it }; t += 0.033
@@ -158,13 +176,14 @@ class ChallengeSequencerTest {
     @Test
     fun `update after Finished returns null`() {
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK))
-        seq.update(closedEyeFrame(), 0.0)
-        seq.update(closedEyeFrame(), 0.033)
-        val fin = seq.update(lm(neutralFace()), 0.066)
+        var t = warmupBlink(seq, 0.0)
+        seq.update(closedEyeFrame(), t); t += 0.033
+        seq.update(closedEyeFrame(), t); t += 0.033
+        val fin = seq.update(lm(neutralFace()), t); t += 0.033
         assertTrue(fin is ChallengeEvent.Finished)
         // Sealed after Finished — further updates must not re-fire events.
-        assertNull(seq.update(lm(neutralFace()), 0.1))
-        assertNull(seq.update(closedEyeFrame(), 0.2))
+        assertNull(seq.update(lm(neutralFace()), t))
+        assertNull(seq.update(closedEyeFrame(), t + 0.1))
     }
 
     // MARK: - Elapsed clock start
@@ -255,9 +274,10 @@ class ChallengeSequencerTest {
     fun `firedSteps carries the detected prefix on timeout`() {
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK, Challenge.LOOK_LEFT))
         // Fire blink.
-        seq.update(closedEyeFrame(), 0.0)
-        seq.update(closedEyeFrame(), 0.033)
-        seq.update(lm(neutralFace()), 0.066) // completes blink, index→1
+        var t = warmupBlink(seq, 0.0)
+        seq.update(closedEyeFrame(), t); t += 0.033
+        seq.update(closedEyeFrame(), t); t += 0.033
+        seq.update(lm(neutralFace()), t); t += 0.033 // completes blink, index→1
         // Now time out before look-left fires.
         val fin = seq.update(lm(neutralFace()), 8.5) as ChallengeEvent.Finished
         assertFalse(fin.result.completed)
@@ -268,12 +288,13 @@ class ChallengeSequencerTest {
     @Test
     fun `firedSteps equals full sequence on completed run`() {
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK, Challenge.LOOK_LEFT))
-        seq.update(closedEyeFrame(), 0.0)
-        seq.update(closedEyeFrame(), 0.033)
-        seq.update(lm(neutralFace()), 0.066)
-        seq.update(leftGazeFrame(), 0.1)
-        seq.update(leftGazeFrame(), 0.133)
-        val fin = seq.update(leftGazeFrame(), 0.166) as ChallengeEvent.Finished
+        var t = warmupBlink(seq, 0.0)
+        seq.update(closedEyeFrame(), t); t += 0.033
+        seq.update(closedEyeFrame(), t); t += 0.033
+        seq.update(lm(neutralFace()), t); t += 0.033
+        seq.update(leftGazeFrame(), t); t += 0.033
+        seq.update(leftGazeFrame(), t); t += 0.033
+        val fin = seq.update(leftGazeFrame(), t) as ChallengeEvent.Finished
         assertTrue(fin.result.completed)
         assertEquals(listOf(Challenge.BLINK, Challenge.LOOK_LEFT), fin.result.firedSteps)
     }
@@ -285,12 +306,16 @@ class ChallengeSequencerTest {
         // user gets a full 8s budget regardless of allocation time.
         val seq = ChallengeSequencer.of(listOf(Challenge.BLINK))
         val t0 = 100.0
-        seq.update(closedEyeFrame(), t0)
-        seq.update(closedEyeFrame(), t0 + 0.033)
-        val fin = seq.update(lm(neutralFace()), t0 + 0.066)
+        var t = warmupBlink(seq, t0)
+        seq.update(closedEyeFrame(), t); t += 0.033
+        seq.update(closedEyeFrame(), t); t += 0.033
+        val fin = seq.update(lm(neutralFace()), t)
         assertTrue(fin is ChallengeEvent.Finished)
         val r = (fin as ChallengeEvent.Finished).result
-        assertEquals(0.066, r.elapsedSeconds, 1e-6)
+        // Elapsed = (t at fire) − t0. With 10 warmup + 2 closed + 1 fire
+        // frames at 0.033 apart, that's 12 × 0.033 = 0.396 at the fire
+        // call (the +=0.033 advances past the open frame).
+        assertEquals(12 * 0.033, r.elapsedSeconds, 1e-6)
         assertEquals(1.0f, r.score)
     }
 }

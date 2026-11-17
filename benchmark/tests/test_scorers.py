@@ -306,9 +306,10 @@ def test_combined_scorer_raises_on_missing_frames():
 
 def test_combined_scorer_averages_three_components():
     # Full end-to-end: a synthetic pulsating RGB + a non-trivial grey
-    # ramp face crop → the scorer returns a float in [0, 1]. Pins the
-    # "three equal weights" contract by comparing against the explicit
-    # per-component means.
+    # ramp face crop → the scorer returns a float in [0, 1]. The
+    # orchestrator-proportional weights (LBP ≈ 0.556, Fourier ≈ 0.222,
+    # pos-rppg ≈ 0.222) and each per-component value live in [0, 1],
+    # so their weighted sum must too.
     pytest.importorskip("tensorflow")
     pytest.importorskip("cv2")
     pytest.importorskip("skimage")

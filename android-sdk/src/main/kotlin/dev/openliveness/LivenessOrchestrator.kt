@@ -2,12 +2,13 @@ package dev.openliveness
 
 /**
  * Combines the five layer scores into the single `liveness_decision`
- * that goes into the attestation. The weights, ambient-condition
- * reweighting, and decision thresholds here are the on-device mirror
- * of Spec §13 (lines ~1619-1671); the server trusts the SDK's output
- * but ALSO re-runs the same math from `layer_scores` before issuing a
- * JWT. Any numeric drift between this file and the Swift/Python side
- * causes the server to reject our attestation.
+ * that goes into the attestation. Weights, ambient-condition reweighting,
+ * abstention renormalization, and decision thresholds here are the
+ * on-device mirror of Spec §13 (lines ~1619-1671). The relay accepts
+ * the SDK's decision without recomputing it (see
+ * `relay/src/attestation/verify.ts:checkAssurance`), so the Swift +
+ * Python mirrors matter for cross-platform consistency and the benchmark
+ * harness's `combined` scorer, not for an immediate server round-trip.
  */
 class LivenessOrchestrator {
 
@@ -20,57 +21,137 @@ class LivenessOrchestrator {
     )
 
     companion object {
-        /** Spec §1623-1631. These sum to 1.0; adjusted sets below do
-         *  too, which keeps the weighted score comparable against the
-         *  0.75 / 0.60 thresholds without renormalization. */
+        /**
+         * Calibrated 2026-11 (v0.2.0) after the on-device regression
+         * where honest Layer-4 outputs landed live users at ~0.63 even
+         * after preprocessing alignment. Two shifts from v0.1.0:
+         *
+         *  - **Fourier dropped to 0** — the pure-math screen-replay
+         *    detector in `core/algorithms/layer4_texture.py::fourier_score`
+         *    uses hand-tuned ring frequencies calibrated against the
+         *    2015-era MSU-MFSD cameras. On modern phone captures (1080p+
+         *    sensors downsampled to 80×80 crops) fine skin detail lands
+         *    in the same ring the detector reads as screen pixel pitch,
+         *    producing ~0.15 on real faces. Weighting it toward live
+         *    detection was actively harmful; zero until the detector is
+         *    retuned on a modern corpus.
+         *
+         *  - **LBP weight reduced 0.25 → 0.15** — model card HTER=0.293
+         *    on MSU-MFSD test with optimal threshold 0.358 (< 0.5)
+         *    means the model is systematically low-scoring. Its signal
+         *    is real but modest; L2 (active challenge) and L5
+         *    (behavioral) carry the bulk of the sum.
+         *
+         * Drained mass (0.10 Fourier + 0.10 LBP) redistributed mostly
+         * to L5 (+0.15, behavioral micro-movement proved reliable on-
+         * device and is the second-strongest spoof defense after L2)
+         * with a smaller bump to L2 (+0.05). Specifically balanced so
+         * `L2=0.9 + L5=0.0 + abstained L3` fails cleanly: pure photo
+         * attacks that defeat the challenge but have no micro-saccade
+         * still land below INCONCLUSIVE_THRESHOLD=0.60. L3 held at 0.10
+         * because POS-rPPG on 12s windows abstains most of the time
+         * and the abstention renormaliser compensates anyway.
+         *
+         * Sum = 1.00; every ambient permutation below also sums to 1.00.
+         */
         val DEFAULT_WEIGHTS = Weights(
-            layer2 = 0.30f,
-            layer3 = 0.25f,
-            layer4Lbp = 0.20f,
-            layer4Fourier = 0.15f,
-            layer5 = 0.10f
+            layer2 = 0.50f,
+            layer3 = 0.10f,
+            layer4Lbp = 0.15f,
+            layer4Fourier = 0.00f,
+            layer5 = 0.25f
         )
         const val PASS_THRESHOLD: Float = 0.75f
         const val INCONCLUSIVE_THRESHOLD: Float = 0.60f
 
+        /** Floor below which a Layer-3 confidence combined with both
+         *  liveness flags unset is treated as an abstention rather than
+         *  a 0 vote. Keeps the weighted sum from being dragged down by
+         *  POS-rPPG's expected "insufficient samples" outcome on short
+         *  (~10s) capture windows. */
+        private const val LAYER3_ABSTAIN_EPS: Float = 1e-6f
+
         /**
-         * Pick a weight set based on ambient conditions. Spec §1633-
-         * 1644: low-light cuts the rPPG weight (pulse signal is
-         * unreliable) and shifts that trust into the challenge +
-         * behavioral layers; motion cuts the behavioral weight (jitter
-         * contaminates micro-movement) and shifts to rPPG. When both
-         * are true, low_light is evaluated first and motion stacks on
-         * top of its result, matching the Python reference's sequential
-         * adjustment order so server and client never disagree on the
-         * active weights.
+         * Pick a weight set based on ambient conditions. Low-light cuts
+         * nothing further off Layer 3 (default is already floored at
+         * 0.10) and shifts weight from Layer 4 LBP into Layer 5 —
+         * behavioral micro-movement is ambient-invariant while LBP
+         * texture is noisier under poor illumination. Motion cuts the
+         * behavioral weight (jitter contaminates micro-movement) and
+         * transfers the drained mass into Layer 3. low_light is
+         * evaluated first; motion stacks on top. The Python and Swift
+         * reference implementations follow this same sequential order.
+         *
+         * Permutation sums (all must equal 1.00):
+         *   default      : 0.50 + 0.10 + 0.15 + 0.00 + 0.25 = 1.00
+         *   lowLight     : 0.50 + 0.10 + 0.10 + 0.00 + 0.30 = 1.00
+         *   motion       : 0.50 + 0.30 + 0.15 + 0.00 + 0.05 = 1.00
+         *   lowLight+mot : 0.50 + 0.35 + 0.10 + 0.00 + 0.05 = 1.00
          */
         fun weightsFor(ambient: AmbientConditions): Weights {
             var l2 = DEFAULT_WEIGHTS.layer2
             var l3 = DEFAULT_WEIGHTS.layer3
-            val l4Lbp = DEFAULT_WEIGHTS.layer4Lbp
+            var l4Lbp = DEFAULT_WEIGHTS.layer4Lbp
             val l4F = DEFAULT_WEIGHTS.layer4Fourier
             var l5 = DEFAULT_WEIGHTS.layer5
 
             if (ambient.lowLightDetected) {
-                l3 = 0.15f
-                l2 = 0.35f
-                l5 = 0.15f
+                l4Lbp = 0.10f
+                l5 = 0.30f
             }
             if (ambient.motionDetected) {
                 // C-2: transfer `(l5 - 0.05)` into l3 instead of hard-
-                // coding l3 = 0.30. The hardcoded value only summed to
-                // 1.0 when low_light was off; when both flags fired the
-                // low_light branch had already pushed l5 to 0.15, and
-                // hard-setting l3 = 0.30 produced a weight set summing
-                // to 1.05 — the weighted score could exceed 1.0 and
-                // every threshold shift up with it. Deriving l3 from
-                // the l5 it drains keeps the sum invariant across all
-                // four permutations.
+                // coding l3. Deriving the delta from the l5 drain keeps
+                // the sum invariant across all four permutations, which
+                // the Swift/Python mirrors assume.
                 val transferred = l5 - 0.05f
                 l5 = 0.05f
                 l3 += transferred
             }
             return Weights(l2, l3, l4Lbp, l4F, l5)
+        }
+
+        /**
+         * Layer-3 abstention: compute() returns null (and CDLSession
+         * then publishes confidence=0 + both flags=false) whenever
+         * MIN_SAMPLES_NORMAL isn't reached, zero-mean/zero-std guards
+         * fire, or SNR fails to lock. This is "no signal", not "zero
+         * liveness evidence", and must not drag the weighted sum down
+         * as if the scorer voted 0 — doing that was the on-device
+         * regression that pinned live users below 0.60 after Phase 4
+         * wired real detectors into the sample app.
+         *
+         * Keyed on confidence alone so the Python mirror (whose
+         * `LayerScores` doesn't carry the pulse/bpmInRange booleans —
+         * the attestation JSON doesn't include them either) can apply
+         * the exact same test without an extended schema. CDLSession
+         * zeros the booleans in lockstep with confidence when compute()
+         * returns null, so dropping the boolean co-check loses no
+         * information on the honest path.
+         */
+        fun isLayer3Abstaining(scores: LayerScores): Boolean {
+            return scores.layer3RppgConfidence < LAYER3_ABSTAIN_EPS
+        }
+
+        /**
+         * The weights actually applied to the weighted sum: ambient-
+         * adjusted base weights, then — if Layer 3 is abstaining — the
+         * L3 slot zeroed and the remaining four renormalized so they
+         * sum to 1.0. Exposed so parity tests (and future server-side
+         * mirrors) can reproduce the exact weight set the mobile SDK
+         * used, without duplicating the renormalization math.
+         */
+        fun effectiveWeights(scores: LayerScores, ambient: AmbientConditions): Weights {
+            val base = weightsFor(ambient)
+            if (!isLayer3Abstaining(scores)) return base
+            val remaining = base.layer2 + base.layer4Lbp + base.layer4Fourier + base.layer5
+            return Weights(
+                layer2 = base.layer2 / remaining,
+                layer3 = 0f,
+                layer4Lbp = base.layer4Lbp / remaining,
+                layer4Fourier = base.layer4Fourier / remaining,
+                layer5 = base.layer5 / remaining
+            )
         }
     }
 
@@ -93,7 +174,8 @@ class LivenessOrchestrator {
             )
         }
 
-        val w = weightsFor(ambientConditions)
+        val w = effectiveWeights(layerScores, ambientConditions)
+
         val weighted =
             layerScores.layer2ChallengeScore  * w.layer2 +
             layerScores.layer3RppgConfidence  * w.layer3 +

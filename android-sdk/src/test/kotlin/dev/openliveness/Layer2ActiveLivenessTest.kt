@@ -68,10 +68,19 @@ class Layer2ActiveLivenessTest {
 
     // MARK: - Blink
 
+    // Helper: drive the detector through its 10-frame calibration window
+    // with open-eye frames, so subsequent asserts exercise the fire path
+    // on calibrated baselines instead of returning early from the
+    // calibration branch. Fixture neutralFace() yields EAR = 0.5, so the
+    // baseline settles at 0.5 → closedAt=0.375, openAt=0.475.
+    private fun warmupBlink(d: BlinkDetector) {
+        repeat(BlinkDetector.CALIBRATION_FRAMES) { assertFalse(d.update(lm(neutralFace()))) }
+    }
+
     @Test
     fun `blink fires on close then reopen`() {
         val d = BlinkDetector()
-        repeat(2) { assertFalse(d.update(lm(neutralFace()))) }
+        warmupBlink(d)
         val closed = neutralFace().also { it[159] = FaceLandmark(0.45f, 0.49f) }
         repeat(2) { assertFalse(d.update(lm(closed))) }
         assertTrue(d.update(lm(neutralFace())))
@@ -80,9 +89,26 @@ class Layer2ActiveLivenessTest {
     @Test
     fun `blink does not fire without reopen`() {
         // Static closed-eye photo — reopen gate blocks the replay attack.
+        // Warmup on OPEN frames first so the baseline reflects the real
+        // open-eye EAR; otherwise the detector would calibrate against
+        // the attack photo (see the poisoned-calibration test below).
         val d = BlinkDetector()
+        warmupBlink(d)
         val closed = neutralFace().also { it[159] = FaceLandmark(0.45f, 0.49f) }
         repeat(10) { assertFalse(d.update(lm(closed))) }
+    }
+
+    // M-9 — a sustained closed-eye photo that fills the entire
+    // calibration window must not fire. Baseline settles at the closed-
+    // eye EAR (~0.1), so closedAt≈0.075 and openAt≈0.095; subsequent
+    // frames at 0.1 are above closedAt so never latch, and the reopen
+    // gate never arms. Same invariant as `does not fire without reopen`
+    // but exercises the calibration-poisoning path explicitly.
+    @Test
+    fun `blink does not fire when calibration is poisoned by a closed-eye photo`() {
+        val d = BlinkDetector()
+        val closed = neutralFace().also { it[159] = FaceLandmark(0.45f, 0.49f) }
+        repeat(20) { assertFalse(d.update(lm(closed))) }
     }
 
     // R-2 presentation-attack guard — a sustained closed-eye photo
@@ -94,6 +120,7 @@ class Layer2ActiveLivenessTest {
     @Test
     fun `blink does not fire after face-loss gap followed by open eye`() {
         val d = BlinkDetector()
+        warmupBlink(d)
         val closed = neutralFace().also { it[159] = FaceLandmark(0.45f, 0.49f) }
         // Latch arms (closed for ≥2 frames).
         assertFalse(d.update(lm(closed)))
@@ -113,10 +140,60 @@ class Layer2ActiveLivenessTest {
     @Test
     fun `blink ignores single-frame noise`() {
         val d = BlinkDetector()
+        warmupBlink(d)
         val dip = neutralFace().also { it[159] = FaceLandmark(0.45f, 0.49f) }
         assertFalse(d.update(lm(dip)))
         assertFalse(d.update(lm(neutralFace())))
         assertFalse(d.update(lm(neutralFace())))
+    }
+
+    // M-10 — degenerate (face-lost) frames during the calibration window
+    // must not be sampled as baseline. Without the guard the baseline
+    // would be poisoned by EAR readings from a zero-width eye. Same
+    // shape as SmileDetector's skip-zero-width-calibration test.
+    @Test
+    fun `blink skips zero-eye-width calibration samples`() {
+        val d = BlinkDetector()
+        // 5 real neutral frames + 5 face-lost frames: calibration still
+        // needs 5 more real frames before baseline is non-null.
+        repeat(5) { d.update(lm(neutralFace())) }
+        val lost = neutralFace().also {
+            it[33]  = FaceLandmark(0.50f, 0.50f)
+            it[133] = FaceLandmark(0.50f, 0.50f)
+        }
+        repeat(5) { d.update(lm(lost)) }
+        assertEquals(null, d.neutralEar)
+        repeat(5) { d.update(lm(neutralFace())) }
+        assertEquals(0.5f, d.neutralEar!!, 1e-6f)
+    }
+
+    // M-11 — baseline uses the MEDIAN of calibration samples, not the
+    // mean, so an eager user who blinks during the 10-frame warmup
+    // doesn't drag the baseline down and lock themselves out of firing.
+    // Mirrors the H-4 median-baseline logic in SmileDetector.
+    //
+    // Scenario: 7 open-eye calibration frames (EAR=0.5) + 3 eager-blink
+    // frames (EAR=0.1).
+    //   mean baseline   = (0.5*7 + 0.1*3) / 10 = 0.38 → closedAt=0.285, openAt=0.361
+    //   median baseline = 0.5                        → closedAt=0.375, openAt=0.475
+    // A real blink dip to EAR=0.3 clears median's 0.375 but not mean's
+    // 0.285, so only the median baseline fires.
+    @Test
+    fun `blink uses median baseline that ignores minority outliers`() {
+        val d = BlinkDetector()
+        // 7 open-eye calibration frames (EAR 0.5).
+        repeat(7) { d.update(lm(neutralFace())) }
+        // 3 eager-blink calibration frames (EAR 0.1).
+        val closed = neutralFace().also { it[159] = FaceLandmark(0.45f, 0.49f) }
+        repeat(3) { d.update(lm(closed)) }
+        assertEquals(0.5f, d.neutralEar!!, 1e-6f)
+
+        // A real blink: dip to EAR=0.3 (below median's closedAt=0.375,
+        // above mean's would-be closedAt=0.285).
+        val dip = neutralFace().also { it[159] = FaceLandmark(0.45f, 0.47f) } // EAR = 0.03/0.10 = 0.3
+        repeat(2) { assertFalse(d.update(lm(dip))) }
+        assertTrue(d.update(lm(neutralFace())),
+            "blink at 0.6× baseline must fire with median (would be locked out by mean)")
     }
 
     // MARK: - Gaze

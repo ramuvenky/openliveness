@@ -54,7 +54,14 @@ export const attestationSchema = z
     version: z.string(),
     session_id: z.string().uuid(),
     challenge_id: z.string().uuid(),
-    challenge_response: z.string().min(1),
+    // Empty-string is allowed so a timed-out or zero-progress run reaches
+    // checkChallenge in verify.ts and produces ERR_CHALLENGE_MISMATCH —
+    // the semantic error the field was designed for — instead of being
+    // short-circuited into ERR_SCHEMA_INVALID at the zod boundary. The
+    // mobile SDK emits firedSteps.joinToString(","), which is "" on a
+    // user who completed nothing and a partial list on a user who got
+    // partway through a multi-step sequence.
+    challenge_response: z.string(),
     timestamp: z.string().datetime(),
     liveness_decision: z.enum(['pass', 'fail', 'inconclusive']),
     assurance_level: z.enum(['IAL2', 'IAL1', 'software_only']),
@@ -82,14 +89,6 @@ export const attestationSchema = z
     device_platform: z.enum(['ios', 'android']),
     device_attestation: z.string().min(1).optional(),
     device_id_hash: z.string().min(1),
-    // Defense-in-depth wire marker. The mobile SDKs stamp this `true` when
-    // their liveness path fell back to the Phase-1 hardcoded scores (no
-    // real landmark stream). The relay should refuse `stub_mode: true`
-    // from any session_id not on the CI allowlist — otherwise a hostile
-    // fork that flips the SDK's `allowStubMode` flag could ship an
-    // "always passes" build. Keeping the field optional so builds that
-    // predate this marker continue to parse.
-    stub_mode: z.boolean().optional(),
     ambient_conditions: z
       .object({
         low_light_detected: z.boolean(),

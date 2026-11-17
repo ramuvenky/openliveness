@@ -153,6 +153,9 @@ describe.skipIf(!available)('relay end to end', () => {
     const { body } = await initiate();
     expect(body.challenge_sequence).toHaveLength(3);
     expect(new Set(body.challenge_sequence).size).toBe(3);
+    // Nov 2026: every sequence must include look_left — the one challenge
+    // a flat printed photo can't defeat. See challenge.ts REQUIRED_CHALLENGE.
+    expect(body.challenge_sequence).toContain('look_left');
     const qr = qrFrom(body);
     expect(Object.keys(qr).sort()).toEqual(
       [

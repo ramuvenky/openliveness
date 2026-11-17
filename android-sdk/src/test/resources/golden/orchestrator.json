@@ -4,13 +4,13 @@
       "expected": {
         "assurance_level": "software_only",
         "decision": "pass",
-        "weighted_score": 0.845,
+        "weighted_score": 0.8325,
         "weights_applied": {
-          "layer2": 0.3,
-          "layer3": 0.25,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
-          "layer5": 0.1
+          "layer2": 0.5,
+          "layer3": 0.1,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.15,
+          "layer5": 0.25
         }
       },
       "inputs": {
@@ -34,13 +34,13 @@
       "expected": {
         "assurance_level": "IAL2",
         "decision": "pass",
-        "weighted_score": 0.845,
+        "weighted_score": 0.8325,
         "weights_applied": {
-          "layer2": 0.3,
-          "layer3": 0.25,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
-          "layer5": 0.1
+          "layer2": 0.5,
+          "layer3": 0.1,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.15,
+          "layer5": 0.25
         }
       },
       "inputs": {
@@ -64,12 +64,12 @@
       "expected": {
         "assurance_level": "software_only",
         "decision": "pass",
-        "weighted_score": 0.8500000000000001,
+        "weighted_score": 0.8525000000000001,
         "weights_applied": {
-          "layer2": 0.3,
-          "layer3": 0.3,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
+          "layer2": 0.5,
+          "layer3": 0.30000000000000004,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.15,
           "layer5": 0.05
         }
       },
@@ -94,12 +94,12 @@
       "expected": {
         "assurance_level": "IAL2",
         "decision": "pass",
-        "weighted_score": 0.8500000000000001,
+        "weighted_score": 0.8525000000000001,
         "weights_applied": {
-          "layer2": 0.3,
-          "layer3": 0.3,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
+          "layer2": 0.5,
+          "layer3": 0.30000000000000004,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.15,
           "layer5": 0.05
         }
       },
@@ -124,13 +124,13 @@
       "expected": {
         "assurance_level": "software_only",
         "decision": "pass",
-        "weighted_score": 0.845,
+        "weighted_score": 0.825,
         "weights_applied": {
-          "layer2": 0.35,
-          "layer3": 0.15,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
-          "layer5": 0.15
+          "layer2": 0.5,
+          "layer3": 0.1,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.1,
+          "layer5": 0.3
         }
       },
       "inputs": {
@@ -154,13 +154,13 @@
       "expected": {
         "assurance_level": "IAL2",
         "decision": "pass",
-        "weighted_score": 0.845,
+        "weighted_score": 0.825,
         "weights_applied": {
-          "layer2": 0.35,
-          "layer3": 0.15,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
-          "layer5": 0.15
+          "layer2": 0.5,
+          "layer3": 0.1,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.1,
+          "layer5": 0.3
         }
       },
       "inputs": {
@@ -184,12 +184,12 @@
       "expected": {
         "assurance_level": "software_only",
         "decision": "pass",
-        "weighted_score": 0.8550000000000001,
+        "weighted_score": 0.85,
         "weights_applied": {
-          "layer2": 0.35,
-          "layer3": 0.25,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
+          "layer2": 0.5,
+          "layer3": 0.35,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.1,
           "layer5": 0.05
         }
       },
@@ -214,12 +214,12 @@
       "expected": {
         "assurance_level": "IAL2",
         "decision": "pass",
-        "weighted_score": 0.8550000000000001,
+        "weighted_score": 0.85,
         "weights_applied": {
-          "layer2": 0.35,
-          "layer3": 0.25,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
+          "layer2": 0.5,
+          "layer3": 0.35,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.1,
           "layer5": 0.05
         }
       },
@@ -246,11 +246,11 @@
         "decision": "fail",
         "weighted_score": 0.0,
         "weights_applied": {
-          "layer2": 0.3,
-          "layer3": 0.25,
-          "layer4_fourier": 0.15,
-          "layer4_lbp": 0.2,
-          "layer5": 0.1
+          "layer2": 0.5,
+          "layer3": 0.1,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.15,
+          "layer5": 0.25
         }
       },
       "inputs": {
@@ -269,6 +269,126 @@
         }
       },
       "name": "challenge_missed_hard_fail"
+    },
+    {
+      "expected": {
+        "assurance_level": "IAL2",
+        "decision": "pass",
+        "weighted_score": 0.8611111111111112,
+        "weights_applied": {
+          "layer2": 0.5555555555555556,
+          "layer3": 0.0,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.16666666666666666,
+          "layer5": 0.2777777777777778
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": false,
+          "motion_detected": false
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.0,
+          "layer4_fourier_score": 0.5,
+          "layer4_lbp_score": 0.5,
+          "layer5_behavioral_score": 1.0
+        }
+      },
+      "name": "l3_abstention,ll=False,motion=False"
+    },
+    {
+      "expected": {
+        "assurance_level": "IAL2",
+        "decision": "pass",
+        "weighted_score": 0.8214285714285713,
+        "weights_applied": {
+          "layer2": 0.7142857142857142,
+          "layer3": 0.0,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.21428571428571425,
+          "layer5": 0.07142857142857142
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": false,
+          "motion_detected": true
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.0,
+          "layer4_fourier_score": 0.5,
+          "layer4_lbp_score": 0.5,
+          "layer5_behavioral_score": 1.0
+        }
+      },
+      "name": "l3_abstention,ll=False,motion=True"
+    },
+    {
+      "expected": {
+        "assurance_level": "IAL2",
+        "decision": "pass",
+        "weighted_score": 0.888888888888889,
+        "weights_applied": {
+          "layer2": 0.5555555555555556,
+          "layer3": 0.0,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.11111111111111113,
+          "layer5": 0.33333333333333337
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": true,
+          "motion_detected": false
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.0,
+          "layer4_fourier_score": 0.5,
+          "layer4_lbp_score": 0.5,
+          "layer5_behavioral_score": 1.0
+        }
+      },
+      "name": "l3_abstention,ll=True,motion=False"
+    },
+    {
+      "expected": {
+        "assurance_level": "IAL2",
+        "decision": "pass",
+        "weighted_score": 0.846153846153846,
+        "weights_applied": {
+          "layer2": 0.7692307692307692,
+          "layer3": 0.0,
+          "layer4_fourier": 0.0,
+          "layer4_lbp": 0.15384615384615385,
+          "layer5": 0.07692307692307693
+        }
+      },
+      "inputs": {
+        "ambient_conditions": {
+          "low_light_detected": true,
+          "motion_detected": true
+        },
+        "hardware_attestation_verified": true,
+        "layer_scores": {
+          "layer2_challenge_completed": true,
+          "layer2_challenge_score": 0.9,
+          "layer3_rppg_confidence": 0.0,
+          "layer4_fourier_score": 0.5,
+          "layer4_lbp_score": 0.5,
+          "layer5_behavioral_score": 1.0
+        }
+      },
+      "name": "l3_abstention,ll=True,motion=True"
     }
   ]
 }

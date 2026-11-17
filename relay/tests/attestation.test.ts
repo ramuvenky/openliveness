@@ -111,6 +111,30 @@ describe('challenge', () => {
       expect.objectContaining({ code: 'ERR_CHALLENGE_MISMATCH' }),
     );
   });
+
+  // Regression lock on the v0.2.0 schema fix: an incomplete / timed-out run
+  // from the mobile SDK ships `challenge_response: ""`. Before the fix, the
+  // `.min(1)` zod constraint short-circuited the request into
+  // ERR_SCHEMA_INVALID at the parse boundary — which wasted the field's
+  // whole reason for existing (checkChallenge is supposed to decide this).
+  // The mobile SDK's AttestationBuilder has a sibling test pinning "always
+  // emit firedSteps (empty allowed)"; together they ensure a timed-out
+  // session produces ERR_CHALLENGE_MISMATCH with the actionable message.
+  it('rejects an empty challenge_response with ERR_CHALLENGE_MISMATCH (not ERR_SCHEMA_INVALID)', async () => {
+    const att = await makeAttestation({ challenge_response: '' });
+    expect(() => checkChallenge(att, makeSession())).toThrowError(
+      expect.objectContaining({ code: 'ERR_CHALLENGE_MISMATCH' }),
+    );
+  });
+  it('rejects a partial challenge_response with ERR_CHALLENGE_MISMATCH', async () => {
+    // Session asks for "blink,look_left,smile"; phone only completed "blink"
+    // before timing out. Must reject at the semantic layer with the partial
+    // string visible in the audit trail, not at the zod boundary.
+    const att = await makeAttestation({ challenge_response: 'blink' });
+    expect(() => checkChallenge(att, makeSession())).toThrowError(
+      expect.objectContaining({ code: 'ERR_CHALLENGE_MISMATCH' }),
+    );
+  });
 });
 
 describe('assurance', () => {

@@ -36,31 +36,20 @@ on:
 
 jobs:
   pr-build:
-    # Simulator build on every PR / branch push. macos-14 is the first
-    # runner with Xcode 15 preinstalled, which matches the iOS SDK job
-    # (ios.yml) — keep them aligned so a drift between the two surfaces
-    # as a build failure, not a mysterious runtime mismatch.
-    runs-on: macos-14
+    # Simulator build on every PR / branch push. macos-15 ships Xcode 16
+    # by default, which matches the iOS SDK job (ios.yml) — keep them
+    # aligned so a drift between the two surfaces as a build failure,
+    # not a mysterious runtime mismatch.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode 15
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
-
-      - name: Install XcodeGen 2.42.0
-        # Pinned, not `brew install xcodegen` (which installs latest).
-        # XcodeGen 2.43+ bumped its XcodeProj dependency to generate
-        # `objectVersion = 77` (Xcode 16 project file format), which the
-        # Xcode 15.4 pinned above refuses to open with "future Xcode
-        # project file format (77)". 2.42.0 is the last release that
-        # still emits objectVersion 56 (Xcode 15). Bump this pin when CI
-        # moves to a macos-15 runner with Xcode 16.
-        run: |
-          curl -fL -o /tmp/xcodegen.zip \
-            https://github.com/yonaskolb/XcodeGen/releases/download/2.42.0/xcodegen.zip
-          unzip -q /tmp/xcodegen.zip -d /tmp
-          sudo /tmp/xcodegen/install.sh
-          xcodegen --version
+      - name: Install XcodeGen
+        # `brew install xcodegen` gets the current release, which emits
+        # objectVersion 77 (Xcode 16 project file format) — compatible
+        # with the macos-15 runner's default Xcode. The old 2.42.0 pin
+        # existed only for Xcode 15 compatibility.
+        run: brew install xcodegen && xcodegen --version
 
       - name: Generate Xcode project
         working-directory: ios-sample
@@ -81,7 +70,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
 
-      # `name=iPhone 15,OS=latest` is brittle — GitHub rotates the macos-14
+      # `name=iPhone 15,OS=latest` is brittle — GitHub rotates the macos-15
       # image's simulator catalog, and when the named device is absent
       # xcodebuild falls back to building for macOS. Picking any available
       # iPhone by UDID is stable across catalog rotations. Mirrored in
@@ -119,7 +108,7 @@ jobs:
     # flipped. The `if:` guard short-circuits forks that haven't set
     # the secrets — the whole job is skipped rather than failing with
     # a confusing "secret not set" error.
-    runs-on: macos-14
+    runs-on: macos-15
     if: >-
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_to_testflight == 'true')
@@ -127,23 +116,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode 15
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
-
-      - name: Install XcodeGen 2.42.0
-        # Pinned, not `brew install xcodegen` (which installs latest).
-        # XcodeGen 2.43+ bumped its XcodeProj dependency to generate
-        # `objectVersion = 77` (Xcode 16 project file format), which the
-        # Xcode 15.4 pinned above refuses to open with "future Xcode
-        # project file format (77)". 2.42.0 is the last release that
-        # still emits objectVersion 56 (Xcode 15). Bump this pin when CI
-        # moves to a macos-15 runner with Xcode 16.
-        run: |
-          curl -fL -o /tmp/xcodegen.zip \
-            https://github.com/yonaskolb/XcodeGen/releases/download/2.42.0/xcodegen.zip
-          unzip -q /tmp/xcodegen.zip -d /tmp
-          sudo /tmp/xcodegen/install.sh
-          xcodegen --version
+      - name: Install XcodeGen
+        run: brew install xcodegen && xcodegen --version
 
       - name: Generate Xcode project
         working-directory: ios-sample
@@ -174,11 +148,9 @@ jobs:
       # still produces a clean Release binary with no testability hooks.
       #
       # `-skip-testing:OpenLivenessIntegrationTests` mirrors the ios.yml
-      # unit-tests split. The integration suite talks to the Python stub-
-      # relay (not started here) and passes `allowStubMode: true`
-      # explicitly, so it exercises neither the Release stub-gate nor any
-      # Release-only code — compiling it just costs CI time with zero
-      # added coverage.
+      # unit-tests split. The integration suite talks to the Python
+      # stub-relay (not started here), so compiling it in this job just
+      # costs CI time with zero added coverage.
       - name: Test OpenLiveness SDK (Release config)
         working-directory: ios-sdk
         run: |

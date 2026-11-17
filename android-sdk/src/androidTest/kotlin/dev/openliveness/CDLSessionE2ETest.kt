@@ -46,7 +46,7 @@ class CDLSessionE2ETest {
         val payload = QRPayload(
             session_id = sessionId,
             challenge_id = "ch-1",
-            challenge_sequence = listOf("blink", "turn_left"),
+            challenge_sequence = listOf("blink", "look_left"),
             relay_ws = "ws://localhost:8787/cdl/session/$sessionId/ws",
             relay_http = "http://localhost:8787",
             expires_at = "2099-01-01T00:00:00Z",

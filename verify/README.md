@@ -30,7 +30,7 @@ import { verifyAttestationJWT } from '@openliveness/verify';
 const result = await verifyAttestationJWT(token, {
   relayUrl: 'localhost:3000',     // the relay that issued the JWT
   audience: 'your-domain.com',    // your relying party id
-  requiredAssurance: 'IAL2',      // or 'software_only' to accept either
+  requiredAssurance: 'IAL2',      // 'IAL2' | 'IAL1' | 'software_only' | 'any' (ladder: 'any' accepts anything)
   requiredDecision: 'pass',
 });
 
@@ -40,7 +40,7 @@ if (!result.valid) {
 }
 
 // result.sessionId        — the CDL session id
-// result.assuranceLevel   — 'IAL2' | 'software_only'
+// result.assuranceLevel   — 'IAL2' | 'IAL1' | 'software_only'
 // result.hardwareAttested — true if Play Integrity / App Attest succeeded
 // result.layerScores      — per-layer liveness scores for your audit log
 ```

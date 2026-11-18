@@ -1,6 +1,6 @@
 {
   "name": "@openliveness/verify",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Server-side verification for openliveness attestation JWTs. Check that a signed liveness proof is legitimate — on Node, edge runtimes, or in the browser — without ever processing biometric data.",
   "license": "Apache-2.0",
   "repository": {
@@ -33,7 +33,9 @@
   ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",

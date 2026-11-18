@@ -38,7 +38,7 @@ import { verify } from '@openliveness/web';
 
 const result = await verify({
   relayUrl: 'localhost:3000',     // your relay — see "Running the relay" below
-  assuranceRequired: 'IAL2',      // 'IAL2' | 'software_only'
+  assuranceRequired: 'IAL2',      // 'IAL2' | 'IAL1' | 'any'
   onQRReady: (dataUrl) => (document.getElementById('qr').src = dataUrl),
   onPhoneConnected: () => setStatus('Follow the steps on your phone'),
 });

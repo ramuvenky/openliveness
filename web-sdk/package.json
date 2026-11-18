@@ -1,6 +1,6 @@
 {
   "name": "@openliveness/web",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Browser SDK for openliveness — liveness verification where biometric data never leaves the user's phone. Proves there is a real live human in front of the camera without sending video, photos, or face embeddings to a server.",
   "license": "Apache-2.0",
   "repository": {
@@ -44,7 +44,9 @@
       "default": "./dist/react/LivenessWidget.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -57,7 +59,9 @@
     "react": "^18.0.0"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true }
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/qrcode": "^1.5.0",
